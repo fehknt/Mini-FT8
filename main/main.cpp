@@ -636,9 +636,6 @@ static void poll_ble_uart();
 static void enter_mode(UIMode new_mode);
 static bool g_rx_dirty = false;
 
-static constexpr uart_port_t SOFT_UART_NUM = UART_NUM_1;
-static constexpr int SOFT_UART_TX_PIN = 1;  // G1
-static constexpr int SOFT_UART_RX_PIN = 2;  // G2
 
 
 static std::vector<std::string> g_list_lines = {
@@ -958,32 +955,6 @@ static void log_adif_entry(const std::string& dxcall, const std::string& dxgrid,
   fclose(f);
 }
 
-// Log redirection to soft UART (G1/G2)
-static vprintf_like_t s_prev_vprintf = nullptr;
-static bool s_log_soft_uart = false;
-static int soft_uart_vprintf(const char* fmt, va_list ap) {
-  char buf[256];
-  va_list copy;
-  va_copy(copy, ap);
-  int n = vsnprintf(buf, sizeof(buf), fmt, copy);
-  va_end(copy);
-  if (n > 0) {
-    size_t to_write = (n < (int)sizeof(buf)) ? n : sizeof(buf);
-    uart_write_bytes(SOFT_UART_NUM, buf, to_write);
-  }
-  return n;
-}
-static void set_log_to_soft_uart(bool enable) {
-  if (enable && !s_log_soft_uart) {
-    s_prev_vprintf = esp_log_set_vprintf(soft_uart_vprintf);
-    s_log_soft_uart = true;
-  } else if (!enable && s_log_soft_uart) {
-    if (s_prev_vprintf) {
-      esp_log_set_vprintf(s_prev_vprintf);
-    }
-    s_log_soft_uart = false;
-  }
-}
 
 static void ensure_usb() {
   if (usb_ready) return;
@@ -2888,36 +2859,6 @@ static void save_station_data() {
   fclose(f);
 }
 
-static void init_soft_uart() {
-  static bool initialized = false;
-  if (initialized) return;
-  initialized = true;
-
-  uart_config_t cfg = {};
-  cfg.baud_rate = 115200;
-  cfg.data_bits = UART_DATA_8_BITS;
-  cfg.parity = UART_PARITY_DISABLE;
-  cfg.stop_bits = UART_STOP_BITS_1;
-  cfg.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
-#ifdef UART_SCLK_REF_TICK
-  cfg.source_clk = UART_SCLK_REF_TICK; // 1 MHz ref tick gives precise low baud divisors
-#else
-  cfg.source_clk = UART_SCLK_DEFAULT;
-#endif
-
-  ESP_ERROR_CHECK(uart_driver_install(SOFT_UART_NUM, 512, 0, 0, nullptr, 0));
-  ESP_ERROR_CHECK(uart_param_config(SOFT_UART_NUM, &cfg));
-  ESP_ERROR_CHECK(uart_set_pin(SOFT_UART_NUM, SOFT_UART_TX_PIN, SOFT_UART_RX_PIN,
-                               UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
-  // Match known-good STM32 setup: invert TX/RX levels (idle still high at line), TX-only use
-  // uart_set_line_inverse(SOFT_UART_NUM, UART_SIGNAL_TXD_INV | UART_SIGNAL_RXD_INV);
-  ESP_ERROR_CHECK(gpio_set_drive_capability((gpio_num_t)SOFT_UART_TX_PIN, GPIO_DRIVE_CAP_3));
-  ESP_LOGI(TAG, "Soft UART ready on GPIO%d/GPIO%d @ %d baud",
-           SOFT_UART_TX_PIN, SOFT_UART_RX_PIN, cfg.baud_rate);
-  uart_write_bytes(SOFT_UART_NUM, "Hello World\n", 12);  //debug
-}
-
-
 static void enter_mode(UIMode new_mode) {
   // No special handling needed when leaving TX mode - autoseq manages queue internally
   if (ui_mode == UIMode::STATUS && new_mode != UIMode::STATUS) {
@@ -3032,7 +2973,6 @@ static void app_task_core0(void* /*param*/) {
   // Initialize mutexes for thread-safe operations
   log_mutex = xSemaphoreCreateMutex();
 
-  init_soft_uart();
   ui_init();
   hashtable_init();
 
@@ -3261,9 +3201,6 @@ static void app_task_core0(void* /*param*/) {
 
   static int last_status_uac = -1; // -1 forces a redraw on first entry
   int cur_uac = uac_is_streaming() ? 1 : 0;
-  if (cur_uac && last_status_uac == 0) {
-    set_log_to_soft_uart(true);
-  }
   if (ui_mode == UIMode::STATUS && cur_uac != last_status_uac) {
     draw_status_view();
   }
@@ -3326,8 +3263,8 @@ static void app_task_core0(void* /*param*/) {
         switched = true;
       }
       else if (c == 'q' || c == 'Q') { cancel_status_edit(); enter_mode(ui_mode == UIMode::QSO ? UIMode::RX : UIMode::QSO); switched = true; }
-      else if (c == 'h' || c == 'H') { cancel_status_edit(); set_log_to_soft_uart(true); enter_mode(ui_mode == UIMode::HOST ? UIMode::RX : UIMode::HOST); switched = true; }
-      else if (c == 'c' || c == 'C') { cancel_status_edit(); set_log_to_soft_uart(false); enter_mode(ui_mode == UIMode::CONTROL ? UIMode::RX : UIMode::CONTROL); switched = true; }
+      else if (c == 'h' || c == 'H') { cancel_status_edit(); enter_mode(ui_mode == UIMode::HOST ? UIMode::RX : UIMode::HOST); switched = true; }
+      else if (c == 'c' || c == 'C') { cancel_status_edit(); enter_mode(ui_mode == UIMode::CONTROL ? UIMode::RX : UIMode::CONTROL); switched = true; }
       else if (c == 'd' || c == 'D') { cancel_status_edit(); enter_mode(ui_mode == UIMode::DEBUG ? UIMode::RX : UIMode::DEBUG); switched = true; }
       else if (c == 'l' || c == 'L') { cancel_status_edit(); enter_mode(ui_mode == UIMode::LIST ? UIMode::RX : UIMode::LIST); switched = true; }
       else if (c == 's' || c == 'S') { cancel_status_edit(); enter_mode(ui_mode == UIMode::STATUS ? UIMode::RX : UIMode::STATUS); switched = true; }
@@ -3439,7 +3376,6 @@ static void app_task_core0(void* /*param*/) {
               if (!uac_start()) {
                 debug_log_line("UAC start failed");
               } else {
-                set_log_to_soft_uart(true);
                 g_decode_enabled = true;
                 ui_set_paused(false);
                 ui_clear_waterfall();
