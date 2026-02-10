@@ -1410,10 +1410,12 @@ static void check_slot_boundary() {
     int skip_tones = slot_ms / 160;
     if (skip_tones < 79) {
       g_qso_xmit = false;  // Clear flag before starting TX
-      g_was_txing = true;  // Set IMMEDIATELY when TX starts (prevents decode_monitor_results from re-setting flags)
 
-      // Compute actual TX offset now (before logging) based on offset_src setting
+      // Only proceed if we have a valid pending TX
       if (g_pending_tx_valid && !g_pending_tx.text.empty()) {
+        g_was_txing = true;  // Set IMMEDIATELY when TX starts (prevents decode_monitor_results from re-setting flags)
+
+        // Compute actual TX offset now (before logging) based on offset_src setting
         int actual_offset;
         if (g_offset_src == OffsetSrc::CURSOR) {
           actual_offset = g_offset_hz;
@@ -1427,8 +1429,8 @@ static void check_slot_boundary() {
         }
         g_pending_tx.offset_hz = actual_offset;  // Store for tx_send_task to use
         log_rxtx_line('T', 0, actual_offset, g_pending_tx.text, g_pending_tx.repeat_counter);
+        tx_start_immediate(skip_tones);
       }
-      tx_start_immediate(skip_tones);
     }
   }
 }
