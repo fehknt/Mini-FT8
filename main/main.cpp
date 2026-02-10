@@ -726,8 +726,18 @@ static RadioType g_radio = RadioType::QMX;
 static std::string g_ant = "EFHW";
 static std::string g_comment1 = "MiniFT8 /Radio /Ant";
 static bool g_rxtx_log = true;
-static TaskHandle_t s_tx_task_handle = NULL;
-static portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
+// Single-threaded TX state machine (replaces separate tx_send_task)
+// TX runs in main loop via tx_tick(), one tone at a time
+static bool g_tx_active = false;           // TX state machine is running
+static int g_tx_tone_idx = 0;              // Current tone index (0-78)
+static int64_t g_tx_next_tone_time = 0;    // When to send next tone (ms)
+static uint8_t g_tx_tones[79];             // Encoded tones
+static int g_tx_base_hz = 0;               // Base frequency for TA commands
+static int64_t g_tx_slot_idx = 0;          // Slot index for autoseq_mark_sent
+static bool g_tx_cat_ok = false;           // CAT available for this TX
+static int g_tx_last_ta_int = -1;          // For TA command deduplication
+static int g_tx_last_ta_frac = -1;
+
 static SemaphoreHandle_t log_mutex = NULL;                       // Protects log_rxtx_line file access
 static int menu_page = 0;
 static int menu_edit_idx = -1;
@@ -1372,8 +1382,9 @@ static void update_countdown() {
   }
 }
 
-// Forward declaration for tx_start_immediate
-static void tx_start_immediate(int skip_tones);
+// Forward declarations for single-threaded TX state machine
+static void tx_start(int skip_tones);
+static void tx_tick();
 
 // Slot boundary check - called from main loop
 // Matches reference project: tick after TX slot ends, TX trigger at slot start
@@ -1401,7 +1412,7 @@ static void check_slot_boundary() {
   if (g_qso_xmit &&
       g_target_slot_parity == slot_parity &&
       slot_ms < 4000 &&
-      s_tx_task_handle == NULL) {
+      !g_tx_active) {
 
     ESP_LOGI(TAG, "TX trigger: starting TX in slot %lld (parity %d)",
              (long long)slot_idx, slot_parity);
@@ -1427,9 +1438,9 @@ static void check_slot_boundary() {
           // RANDOM mode or CQ in RX mode: generate random offset
           actual_offset = 500 + (int)(esp_random() % 2001);
         }
-        g_pending_tx.offset_hz = actual_offset;  // Store for tx_send_task to use
+        g_pending_tx.offset_hz = actual_offset;  // Store for tx_start to use
         log_rxtx_line('T', 0, actual_offset, g_pending_tx.text, g_pending_tx.repeat_counter);
-        tx_start_immediate(skip_tones);
+        tx_start(skip_tones);
       }
     }
   }
@@ -1989,202 +2000,100 @@ static void enqueue_beacon_cq() {
   g_tx_view_dirty = true;
 }
 
-struct TxTaskContext {
-  AutoseqTxEntry e;
-  int delay_ms;
-  int64_t slot_idx;
-  int skip_tones;
-};
-
-static void tx_send_task(void* param);
-
 static bool autoseq_has_pending_tx() {
   AutoseqTxEntry tmp;
   return autoseq_fetch_pending_tx(tmp);
 }
 
 // Schedule a one-off pending TX (e.g., manual FreeText) without touching autoseq state.
-// Returns false if a TX task is already running or if scheduling failed.
+// Returns false if TX is already active or if scheduling failed.
+// Uses the single-threaded state machine - TX will trigger at next matching slot boundary.
 static bool schedule_manual_pending_tx(const AutoseqTxEntry& pending) {
-  // Try to reserve the TX task slot
-  taskENTER_CRITICAL(&mux);
-  if (s_tx_task_handle != NULL) {
-    taskEXIT_CRITICAL(&mux);
+  // Already transmitting or TX pending?
+  if (g_tx_active || g_qso_xmit) {
     return false;
   }
-  s_tx_task_handle = (TaskHandle_t)1; // sentinel
-  taskEXIT_CRITICAL(&mux);
-
-  int64_t now_ms = rtc_now_ms();
-  int64_t now_slot = now_ms / 15000;
-  int64_t slot_ms = now_ms % 15000;
-  int now_parity = (int)(now_slot & 1);
 
   int target_parity = pending.slot_id & 1;
-  bool can_inline = (target_parity == now_parity) && (slot_ms < 4000) && (now_slot >= s_last_tx_slot_idx + 2);
 
-  int64_t slot_idx = now_slot;
-  int64_t delay_ms = 0;
-  int skip_tones = 0;
-  if (can_inline) {
-    skip_tones = (int)(slot_ms / 160);
-    if (skip_tones >= 79) {
-      s_tx_task_handle = NULL;
-      return false;
-    }
-  } else {
-    if (slot_ms != 0) slot_idx += 1;
-    if (slot_idx <= s_last_tx_slot_idx + 1) {
-      slot_idx = s_last_tx_slot_idx + 2;
-    }
-    while ((slot_idx & 1) != target_parity) {
-      slot_idx += 1;
-    }
-    delay_ms = slot_idx * 15000 - now_ms;
-  }
-
+  // Set up pending TX
   g_pending_tx = pending;
   g_pending_tx_valid = true;
 
-  auto* ctx = new TxTaskContext{pending, (int)delay_ms, slot_idx, skip_tones};
-  xTaskCreatePinnedToCore(tx_send_task, "tx_sched", 4096, ctx, 5, &s_tx_task_handle, 0);
+  // Set flags for check_slot_boundary() to trigger TX
+  g_qso_xmit = true;
+  g_target_slot_parity = target_parity;
+
+  ESP_LOGI(TAG, "schedule_manual_pending_tx: queued TX=%s for parity=%d",
+           pending.text.c_str(), target_parity);
   return true;
 }
 
+// NOTE: This function is now mostly superseded by the state machine approach.
+// TX scheduling is done via g_qso_xmit and g_target_slot_parity flags,
+// and check_slot_boundary() triggers TX at the right time.
+// Keeping this as a no-op for now in case any code still calls it.
 static void schedule_tx_if_idle() {
-  // Use critical section to atomically check and set task handle
-  taskENTER_CRITICAL(&mux);
-  if (s_tx_task_handle != NULL) {
-    taskEXIT_CRITICAL(&mux);
-    return;
-  }
-  // Mark as "about to create" by setting a sentinel value
-  s_tx_task_handle = (TaskHandle_t)1;
-  taskEXIT_CRITICAL(&mux);
-
-  // NOTE: Beacon CQ is enqueued in decode_monitor_results(), not here.
-  // This function just schedules whatever is in the autoseq queue.
-
-  // Get timing info
-  int64_t now_ms = rtc_now_ms();
-  int64_t now_slot = now_ms / 15000;
-  int64_t slot_ms = now_ms % 15000;
-  int now_parity = (int)(now_slot & 1);
-
-  // NOTE: Don't call autoseq_tick here! Tick is for retry management and
-  // should only be called AFTER TX completes. Here we just fetch current next_tx.
-
-  // Try to fetch pending TX from autoseq (reads current state, doesn't modify)
-  AutoseqTxEntry pending;
-  if (!autoseq_fetch_pending_tx(pending)) {
-    s_tx_task_handle = NULL;
-    g_pending_tx_valid = false;
-    return;
-  }
-
-  g_pending_tx = pending;
-  g_pending_tx_valid = true;
-
-  int target_parity = pending.slot_id & 1;
-  bool can_inline = (target_parity == now_parity) && (slot_ms < 4000) && (now_slot >= s_last_tx_slot_idx + 2);
-
-  int64_t slot_idx = now_slot;
-  int64_t delay_ms = 0;
-  int skip_tones = 0;
-  if (can_inline) {
-    // start in current slot, skip elapsed symbols
-    skip_tones = (int)(slot_ms / 160);
-    if (skip_tones >= 79) {
-      s_tx_task_handle = NULL;
-      return;
-    }
-    delay_ms = 0;
-  } else {
-    if (slot_ms != 0) slot_idx += 1;
-    if (slot_idx <= s_last_tx_slot_idx + 1) {
-      slot_idx = s_last_tx_slot_idx + 2;
-    }
-    while ((slot_idx & 1) != target_parity) {
-      slot_idx += 1;
-    }
-    delay_ms = slot_idx * 15000 - now_ms;
-  }
-
-  auto* ctx = new TxTaskContext{pending, (int)delay_ms, slot_idx, skip_tones};
-  xTaskCreatePinnedToCore(tx_send_task, "tx_sched", 4096, ctx, 5, &s_tx_task_handle, 0);
+  // No-op: TX scheduling is now handled by decode_monitor_results setting
+  // g_qso_xmit and check_slot_boundary triggering TX at slot start.
 }
 
-// Start TX immediately (called from check_slot_boundary at the right time)
-// This is the simplified TX trigger matching reference architecture
+// Helper to send TA command (deduplicated)
+static void tx_send_ta(float tone_hz) {
+  int ta_int = (int)lrintf(tone_hz);
+  float frac = tone_hz - (float)ta_int;
+  int ta_frac = (int)lrintf(frac * 100.0f);
+  if (ta_int == g_tx_last_ta_int && ta_frac == g_tx_last_ta_frac) return;
+  char ta[16];
+  snprintf(ta, sizeof(ta), "TA%04d.%02d;", ta_int, ta_frac);
+  cat_cdc_send(reinterpret_cast<const uint8_t*>(ta), strlen(ta), 10);
+  g_tx_last_ta_int = ta_int;
+  g_tx_last_ta_frac = ta_frac;
+}
+
+// Start TX (single-threaded state machine initialization)
+// Called from check_slot_boundary at the right time
 // Uses g_pending_tx which was prepared by check_slot_boundary with correct offset
-static void tx_start_immediate(int skip_tones) {
-  // Atomically check and set task handle
-  taskENTER_CRITICAL(&mux);
-  if (s_tx_task_handle != NULL) {
-    taskEXIT_CRITICAL(&mux);
+static void tx_start(int skip_tones) {
+  // Already transmitting?
+  if (g_tx_active) {
     return;
   }
-  s_tx_task_handle = (TaskHandle_t)1;
-  taskEXIT_CRITICAL(&mux);
 
   // Use g_pending_tx which was prepared by check_slot_boundary
-  // (with correct offset_hz already computed)
   if (!g_pending_tx_valid || g_pending_tx.text.empty()) {
-    s_tx_task_handle = NULL;
-    ESP_LOGW(TAG, "tx_start_immediate: no pending TX");
+    ESP_LOGW(TAG, "tx_start: no pending TX");
     return;
   }
 
   // Get current slot info
   int64_t now_ms = rtc_now_ms();
-  int64_t slot_idx = now_ms / 15000;
+  g_tx_slot_idx = now_ms / 15000;
 
-  ESP_LOGI(TAG, "tx_start_immediate: TX=%s offset=%d skip=%d slot=%lld",
-           g_pending_tx.text.c_str(), g_pending_tx.offset_hz, skip_tones, (long long)slot_idx);
+  ESP_LOGI(TAG, "tx_start: TX=%s offset=%d skip=%d slot=%lld",
+           g_pending_tx.text.c_str(), g_pending_tx.offset_hz, skip_tones, (long long)g_tx_slot_idx);
 
-  auto* ctx = new TxTaskContext{g_pending_tx, 0, slot_idx, skip_tones};
-  xTaskCreatePinnedToCore(tx_send_task, "tx_imm", 4096, ctx, 5, &s_tx_task_handle, 0);
-}
-
-static void tx_send_task(void* param) {
-  std::unique_ptr<TxTaskContext> ctx(reinterpret_cast<TxTaskContext*>(param));
-  if (ctx->delay_ms > 0) vTaskDelay(pdMS_TO_TICKS(ctx->delay_ms));
-
-  if (g_tx_cancel_requested) {
-    g_pending_tx_valid = false;
-    g_tx_cancel_requested = false;
-    s_tx_task_handle = NULL;
-    // TX decision will be re-evaluated after next decode
-    vTaskDelete(NULL);
-    return;
-  }
-
-  const AutoseqTxEntry& e = ctx->e;
-  if (e.text.empty()) {
-    s_tx_task_handle = NULL;
-    // TX decision will be re-evaluated after next decode
-    vTaskDelete(NULL);
-    return;
-  }
-
+  // Encode message to tones
   ftx_message_t msg;
-  ftx_message_rc_t rc = ftx_message_encode(&msg, &hash_if, e.text.c_str());
+  ftx_message_rc_t rc = ftx_message_encode(&msg, &hash_if, g_pending_tx.text.c_str());
   if (rc != FTX_MESSAGE_RC_OK) {
     ESP_LOGE(TAG, "Encode failed for TX");
-    s_tx_task_handle = NULL;
-    vTaskDelete(NULL);
     return;
   }
-  uint8_t tones[79] = {0};
-  ft8_encode(msg.payload, tones);
+  ft8_encode(msg.payload, g_tx_tones);
 
-  // Use pre-computed offset from check_slot_boundary (stored in e.offset_hz)
-  // This ensures log and actual TX use the same frequency
-  int base_hz = e.offset_hz;
-  ESP_LOGI(TAG, "TX base_hz=%d (from pre-computed offset, text=%s)", base_hz, e.text.c_str());
+  // Set up TX state machine
+  g_tx_base_hz = g_pending_tx.offset_hz;
+  g_tx_tone_idx = (skip_tones >= 79) ? 79 : skip_tones;
+  g_tx_next_tone_time = now_ms;  // Start immediately
+  g_tx_last_ta_int = -1;
+  g_tx_last_ta_frac = -1;
 
-  bool cat_ok = cat_cdc_ready();
-  if (cat_ok) {
+  ESP_LOGI(TAG, "TX base_hz=%d (from pre-computed offset, text=%s)", g_tx_base_hz, g_pending_tx.text.c_str());
+
+  // Send CAT setup commands
+  g_tx_cat_ok = cat_cdc_ready();
+  if (g_tx_cat_ok) {
     const char* md = "MD6;";
     const char* tx = "TX;";
     cat_cdc_send(reinterpret_cast<const uint8_t*>(md), strlen(md), 200);
@@ -2194,64 +2103,79 @@ static void tx_send_task(void* param) {
   // Auto-switch to TX screen when transmission starts
   g_auto_switch_to_tx = true;
 
-  int start_tone = ctx->skip_tones;
-  if (start_tone >= 79) start_tone = 79;
-  if (ctx->skip_tones > 0) {
-    ESP_LOGI("TXTONE", "Skipping first %d tones due to late start", ctx->skip_tones);
+  if (skip_tones > 0) {
+    ESP_LOGI("TXTONE", "Skipping first %d tones due to late start", skip_tones);
   }
-  int last_ta_int = -1;
-  int last_ta_frac = -1;
-  auto send_ta = [&](float tone_hz) {
-    int ta_int = (int)lrintf(tone_hz);
-    float frac = tone_hz - (float)ta_int;
-    int ta_frac = (int)lrintf(frac * 100.0f); // two decimals
-    if (ta_int == last_ta_int && ta_frac == last_ta_frac) return;
-    char ta[16];
-    snprintf(ta, sizeof(ta), "TA%04d.%02d;", ta_int, ta_frac);
-    cat_cdc_send(reinterpret_cast<const uint8_t*>(ta), strlen(ta), 10);
-    last_ta_int = ta_int;
-    last_ta_frac = ta_frac;
-  };
 
   // Send first tone TA if CAT is ready
-  if (cat_ok && start_tone < 79) {
-    float tone_hz = base_hz + 6.25f * tones[start_tone];
-    send_ta(tone_hz);
+  if (g_tx_cat_ok && g_tx_tone_idx < 79) {
+    float tone_hz = g_tx_base_hz + 6.25f * g_tx_tones[g_tx_tone_idx];
+    tx_send_ta(tone_hz);
   }
 
-  bool cancelled = false;
-  for (int i = start_tone; i < 79; ++i) {
-    if (g_tx_cancel_requested) { cancelled = true; break; }
-    ESP_LOGD("TXTONE", "%02d %u", i, (unsigned)tones[i]);
-    fft_waterfall_tx_tone(tones[i]);
-    if (cat_ok) {
-      float tone_hz = base_hz + 6.25f * tones[i];
-      send_ta(tone_hz);
+  // Mark TX as active
+  g_tx_active = true;
+}
+
+// TX state machine tick - called from main loop
+// Sends one tone at a time, non-blocking
+static void tx_tick() {
+  if (!g_tx_active) {
+    return;
+  }
+
+  int64_t now_ms = rtc_now_ms();
+
+  // Check for cancel request
+  if (g_tx_cancel_requested) {
+    ESP_LOGI(TAG, "tx_tick: TX cancelled at tone %d", g_tx_tone_idx);
+    if (g_tx_cat_ok) {
+      const char* rx = "RX;";
+      cat_cdc_send(reinterpret_cast<const uint8_t*>(rx), strlen(rx), 200);
     }
-    vTaskDelay(pdMS_TO_TICKS(160));
-  }
-  if (cat_ok) {
-    const char* rx = "RX;";
-    cat_cdc_send(reinterpret_cast<const uint8_t*>(rx), strlen(rx), 200);
+    g_tx_active = false;
+    g_pending_tx_valid = false;
+    g_tx_cancel_requested = false;
+    g_was_txing = false;  // TX was cancelled - don't call tick at slot boundary
+    g_tx_view_dirty = true;
+    return;
   }
 
-  if (!cancelled) {
+  // Time to send next tone?
+  if (now_ms < g_tx_next_tone_time) {
+    return;  // Not yet
+  }
+
+  // All tones sent?
+  if (g_tx_tone_idx >= 79) {
+    ESP_LOGI(TAG, "tx_tick: TX complete, all 79 tones sent");
+    if (g_tx_cat_ok) {
+      const char* rx = "RX;";
+      cat_cdc_send(reinterpret_cast<const uint8_t*>(rx), strlen(rx), 200);
+    }
     // Record slot index for spacing and notify autoseq
-    s_last_tx_slot_idx = ctx->slot_idx;
-    autoseq_mark_sent(ctx->slot_idx);
-    // g_was_txing stays true (set at TX start) - tick will be called at slot boundary
-  } else {
-    // TX was cancelled mid-way - don't call tick, allow re-evaluation
-    g_was_txing = false;
+    s_last_tx_slot_idx = g_tx_slot_idx;
+    autoseq_mark_sent(g_tx_slot_idx);
+    // g_was_txing stays true - tick will be called at slot boundary
+
+    g_tx_active = false;
+    g_pending_tx_valid = false;
+    g_tx_cancel_requested = false;
+    g_tx_view_dirty = true;
+    return;
   }
 
-  g_pending_tx_valid = false;
-  g_tx_cancel_requested = false;
-  g_tx_view_dirty = true;  // Request TX view refresh from main loop
-  s_tx_task_handle = NULL;
-  // Note: Don't call schedule_tx_if_idle or autoseq_tick here
-  // TX decision happens after decode, tick happens at slot boundary
-  vTaskDelete(NULL);
+  // Send current tone
+  ESP_LOGD("TXTONE", "%02d %u", g_tx_tone_idx, (unsigned)g_tx_tones[g_tx_tone_idx]);
+  fft_waterfall_tx_tone(g_tx_tones[g_tx_tone_idx]);
+  if (g_tx_cat_ok) {
+    float tone_hz = g_tx_base_hz + 6.25f * g_tx_tones[g_tx_tone_idx];
+    tx_send_ta(tone_hz);
+  }
+
+  // Advance to next tone
+  g_tx_tone_idx++;
+  g_tx_next_tone_time = now_ms + 160;
 }
 
 static void draw_menu_view() {
@@ -3056,6 +2980,7 @@ static void app_task_core0(void* /*param*/) {
     rtc_tick();
     update_countdown();
     check_slot_boundary();  // TX trigger at slot boundary (matching reference architecture)
+    tx_tick();              // Process TX state machine (single-threaded, non-blocking)
 
   // HOST mode: UAC audio streaming - update status display
   if (ui_mode == UIMode::HOST) {
@@ -3189,6 +3114,7 @@ static void app_task_core0(void* /*param*/) {
   rtc_tick();
   update_countdown();
   check_slot_boundary();  // TX trigger at slot boundary (matching reference architecture)
+  tx_tick();              // Process TX state machine (single-threaded, non-blocking)
   menu_flash_tick();
   rx_flash_tick();
   apply_pending_sync();
