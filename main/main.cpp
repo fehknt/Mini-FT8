@@ -1410,6 +1410,7 @@ static void check_slot_boundary() {
     int skip_tones = slot_ms / 160;
     if (skip_tones < 79) {
       g_qso_xmit = false;  // Clear flag before starting TX
+      g_was_txing = true;  // Set IMMEDIATELY when TX starts (prevents decode_monitor_results from re-setting flags)
 
       // Compute actual TX offset now (before logging) based on offset_src setting
       if (g_pending_tx_valid && !g_pending_tx.text.empty()) {
@@ -2236,8 +2237,10 @@ static void tx_send_task(void* param) {
     // Record slot index for spacing and notify autoseq
     s_last_tx_slot_idx = ctx->slot_idx;
     autoseq_mark_sent(ctx->slot_idx);
-    // Set was_txing flag - autoseq_tick will be called at slot boundary
-    g_was_txing = true;
+    // g_was_txing stays true (set at TX start) - tick will be called at slot boundary
+  } else {
+    // TX was cancelled mid-way - don't call tick, allow re-evaluation
+    g_was_txing = false;
   }
 
   g_pending_tx_valid = false;
