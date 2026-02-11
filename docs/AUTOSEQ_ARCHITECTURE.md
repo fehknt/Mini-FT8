@@ -259,6 +259,133 @@ if (!g_was_txing) {
 }
 ```
 
+## Audio Sample-Driven Timing (Critical Design Detail)
+
+The reference project uses **audio sample timing** to drive all RX/TX symbol processing,
+NOT wall clock timing. This is critical for proper synchronization.
+
+### Reference Design: I2S-Driven Event Loop
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    AUDIO SAMPLE TIMING ARCHITECTURE                      │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  I2S DMA Interrupt (32kHz sample rate)                                   │
+│  ├── Fires every 40ms (1280 samples per half-buffer)                    │
+│  ├── Sets DSP_Flag in ISR                                               │
+│  └── Main loop checks DSP_Flag                                          │
+│                                                                          │
+│  Symbol Timing (4 × 40ms = 160ms per symbol)                            │
+│  ├── frame_counter increments on each DSP_Flag                          │
+│  ├── When frame_counter == 2, send next TX tone                         │
+│  └── 79 tones × 160ms = 12,640ms TX duration                           │
+│                                                                          │
+│  RX Symbol Counting                                                      │
+│  ├── FT_8_counter increments per 160ms of audio                         │
+│  ├── At 91 symbols (14,560ms), decode is triggered                      │
+│  └── decode_flag is set for main loop                                   │
+│                                                                          │
+│  Slot Boundary (HAL_GetTick based, 15s intervals)                       │
+│  ├── ft8_time = HAL_GetTick() - start_time                              │
+│  ├── current_slot = ft8_time / 15000 % 2                                │
+│  └── When slot changes: reset counters, call tick if was_txing         │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Insight: TX Duration is Guaranteed by Sample Counting
+
+In the reference design:
+1. **TX starts** when `setup_to_transmit_on_next_DSP_Flag()` is called
+2. **Each DSP_Flag** (40ms) advances `frame_counter`
+3. **Every 4 DSP_Flags** (160ms), a tone is sent
+4. **After 79 tones**, TX automatically stops: `ft8_xmit_counter == 79`
+5. **Slot boundary detection** happens AFTER TX completes because:
+   - 79 tones × 160ms = 12,640ms
+   - Slot boundary at 15,000ms
+   - TX completes ~2,360ms before slot boundary
+
+### Reference Code: TX Tone Timing
+
+```c
+if (DSP_Flag) {
+    DSP_Flag = 0;
+    I2S2_RX_ProcessBuffer(buff_offset);
+
+    if (xmit_flag) {
+        if (ft8_xmit_delay >= 28) {  // ~1.1s startup delay
+            if ((ft8_xmit_counter < 79) && (frame_counter == 2)) {
+                set_FT8_Tone(tones[ft8_xmit_counter]);
+                ft8_xmit_counter++;
+            }
+            if (ft8_xmit_counter == 79) {
+                ft8_receive_sequence();
+                receive_sequence();
+                xmit_flag = 0;
+            }
+        } else {
+            ++ft8_xmit_delay;
+        }
+    }
+}
+```
+
+### Why This Matters for Mini-FT8
+
+**Problem with wall clock timing:**
+- TX starts at slot boundary (t=0ms)
+- `tx_tick()` uses `rtc_now_ms()` to check if 160ms elapsed
+- Slot boundary detected at t=15000ms via wall clock
+- BUT: Wall clock and audio timing can drift apart
+- If TX hasn't sent all 79 tones when slot boundary hits, `tick()` is called too early
+
+**Solution: Sample-Driven Timing**
+- Count UAC audio samples instead of wall clock time
+- 48kHz × 0.160s = 7,680 samples per symbol
+- 79 symbols × 7,680 = 606,720 samples for full TX
+- TX completion is guaranteed before slot boundary detection
+
+### Mini-FT8 Implementation Options
+
+**Option 1: Sample-Counted TX**
+```cpp
+// In UAC audio callback (fires every block of samples)
+static int g_tx_sample_count = 0;
+static int g_tx_current_tone = 0;
+
+void on_audio_block(int samples_received) {
+    if (g_tx_active) {
+        g_tx_sample_count += samples_received;
+        if (g_tx_sample_count >= 7680) {  // 160ms at 48kHz
+            g_tx_sample_count -= 7680;
+            send_next_tone();
+            g_tx_current_tone++;
+            if (g_tx_current_tone >= 79) {
+                tx_complete();
+            }
+        }
+    }
+}
+```
+
+**Option 2: Block-Counted TX**
+```cpp
+// Block size = 1920 samples at 48kHz = 40ms per block
+// 4 blocks = 160ms = 1 symbol
+static int g_tx_block_count = 0;
+
+void on_audio_block() {
+    if (g_tx_active) {
+        g_tx_block_count++;
+        if (g_tx_block_count >= 4) {  // 4 × 40ms = 160ms
+            g_tx_block_count = 0;
+            send_next_tone();
+        }
+    }
+}
+```
+
 ## Summary: The Golden Rules
 
 1. **Decode sets flags, slot boundary triggers TX** - Never start TX immediately after decode
@@ -266,3 +393,5 @@ if (!g_was_txing) {
 3. **CQ is short-lived** - Added when needed, transmitted once, popped by tick
 4. **Queue[0] is always the active entry** - tick() and fetch_pending_tx() both use queue[0]
 5. **Event 2 before Event 3** - Decode processing completes before TX decision is made
+6. **Audio samples drive symbol timing** - RX/TX duration determined by sample count, not wall clock
+7. **Slot boundary uses wall clock** - 15s intervals based on system tick/RTC

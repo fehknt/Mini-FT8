@@ -1397,14 +1397,16 @@ static void check_slot_boundary() {
   // Detect slot boundary (parity change)
   if (slot_parity != g_last_slot_parity) {
     g_last_slot_parity = slot_parity;
+  }
 
-    // If we were transmitting, call tick to pop the completed TX entry
-    if (g_was_txing) {
-      ESP_LOGI(TAG, "Slot boundary: was_txing, calling tick");
-      autoseq_tick(slot_idx, slot_parity, 0);
-      g_was_txing = false;
-      g_tx_view_dirty = true;
-    }
+  // Call tick AFTER TX has completed (not while TX is still active)
+  // This ensures autoseq_tick() operates on the correct completed TX entry
+  if (g_was_txing && !g_tx_active) {
+    ESP_LOGI(TAG, "TX completed, calling tick (slot %lld, parity %d)",
+             (long long)slot_idx, slot_parity);
+    autoseq_tick(slot_idx, slot_parity, 0);
+    g_was_txing = false;
+    g_tx_view_dirty = true;
   }
 
   // TX trigger: check if we should start TX in this slot
@@ -2175,7 +2177,9 @@ static void tx_tick() {
 
   // Advance to next tone
   g_tx_tone_idx++;
-  g_tx_next_tone_time = now_ms + 160;
+  // Use += to maintain consistent 160ms intervals from TX start
+  // (using now_ms + 160 would accumulate timing errors if tx_tick() is delayed)
+  g_tx_next_tone_time += 160;
 }
 
 static void draw_menu_view() {
