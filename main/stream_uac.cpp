@@ -30,6 +30,7 @@ extern void log_heap(const char* tag);
 extern bool g_streaming;
 extern bool g_decode_enabled;
 extern int64_t g_decode_slot_idx;
+extern volatile bool g_decode_in_progress;
 void decode_monitor_results(monitor_t* mon, const monitor_config_t* cfg, bool update_ui);
 int64_t rtc_now_ms();
 
@@ -643,7 +644,9 @@ static void stream_uac_task(void* arg) {
                              (long long)slot_idx, slot_blocks, mon.wf.num_blocks);
                     if (g_decode_enabled) {
                         g_decode_slot_idx = slot_idx;
+                        g_decode_in_progress = true;  // Block TX trigger until decode finishes
                         decode_monitor_results(&mon, &mon_cfg, false);
+                        // g_decode_in_progress is cleared at the end of decode_monitor_results
                     } else {
                         ESP_LOGI(TAG, "Decode paused; skipping");
                     }

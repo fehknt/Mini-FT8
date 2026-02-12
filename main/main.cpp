@@ -588,6 +588,7 @@ int64_t g_decode_slot_idx = -1; // set at decode trigger to tag RX lines with sl
 static volatile bool g_qso_xmit = false;        // TX is pending
 static volatile int g_target_slot_parity = 0;   // 0=even, 1=odd - parity of slot to TX on
 static volatile bool g_was_txing = false;       // We were transmitting (for tick timing)
+volatile bool g_decode_in_progress = false; // Block TX trigger while decoding
 static int g_last_slot_parity = -1;             // For slot boundary detection (just parity, like reference)
 static const char* STATION_FILE = "/spiffs/StationData.ini";
 
@@ -731,6 +732,7 @@ static bool g_rxtx_log = true;
 static bool g_tx_active = false;           // TX state machine is running
 static int g_tx_tone_idx = 0;              // Current tone index (0-78)
 static int64_t g_tx_next_tone_time = 0;    // When to send next tone (ms)
+static int64_t g_tx_slot_start_ms = 0;     // Slot boundary time for tone alignment
 static uint8_t g_tx_tones[79];             // Encoded tones
 static int g_tx_base_hz = 0;               // Base frequency for TA commands
 static int64_t g_tx_slot_idx = 0;          // Slot index for autoseq_mark_sent
@@ -1410,11 +1412,13 @@ static void check_slot_boundary() {
   }
 
   // TX trigger: check if we should start TX in this slot
-  // Conditions: qso_xmit flag set, correct parity, early enough in slot, not already TXing
+  // Conditions: qso_xmit flag set, correct parity, early enough in slot, not already TXing,
+  // and decode must be complete (TX is always triggered by decode results)
   if (g_qso_xmit &&
       g_target_slot_parity == slot_parity &&
       slot_ms < 4000 &&
-      !g_tx_active) {
+      !g_tx_active &&
+      !g_decode_in_progress) {
 
     ESP_LOGI(TAG, "TX trigger: starting TX in slot %lld (parity %d)",
              (long long)slot_idx, slot_parity);
@@ -1422,10 +1426,12 @@ static void check_slot_boundary() {
     // Calculate skip_tones for partial slot
     int skip_tones = slot_ms / 160;
     if (skip_tones < 79) {
-      g_qso_xmit = false;  // Clear flag before starting TX
-
       // Only proceed if we have a valid pending TX
+      // NOTE: Don't clear g_qso_xmit until we're sure g_pending_tx is valid.
+      // This avoids a race condition where decode_monitor_results is still
+      // writing g_pending_tx on core 1 while we read it on core 0.
       if (g_pending_tx_valid && !g_pending_tx.text.empty()) {
+        g_qso_xmit = false;  // Clear flag only AFTER validation succeeds
         g_was_txing = true;  // Set IMMEDIATELY when TX starts (prevents decode_monitor_results from re-setting flags)
 
         // Compute actual TX offset now (before logging) based on offset_src setting
@@ -1709,6 +1715,7 @@ void decode_monitor_results(monitor_t* mon, const monitor_config_t* cfg, bool up
     g_rx_lines.clear();
     if (update_ui) { ui_set_rx_list(g_rx_lines); ui_draw_rx(); }
     else g_rx_dirty = true;
+    g_decode_in_progress = false;  // Clear flag before early return
     return;
   }
 
@@ -1918,6 +1925,7 @@ void decode_monitor_results(monitor_t* mon, const monitor_config_t* cfg, bool up
     debug_log_line_public(buf);
 #endif
 
+  g_decode_in_progress = false;  // Allow TX trigger now that decode is complete
 }
 
 static void draw_menu_long_edit() {
@@ -2085,9 +2093,15 @@ static void tx_start(int skip_tones) {
   ft8_encode(msg.payload, g_tx_tones);
 
   // Set up TX state machine
+  // IMPORTANT: Tone timing must be based on slot boundary, not TX start time.
+  // This ensures TX ends at the correct time even if TX started late,
+  // allowing RX to start cleanly at the next slot boundary.
   g_tx_base_hz = g_pending_tx.offset_hz;
+  g_tx_slot_start_ms = (now_ms / 15000) * 15000;  // Slot boundary time
   g_tx_tone_idx = (skip_tones >= 79) ? 79 : skip_tones;
-  g_tx_next_tone_time = now_ms;  // Start immediately
+  // Next tone time = slot_start + tone_idx * 160ms
+  // This aligns all tones to the slot boundary, not to when TX started
+  g_tx_next_tone_time = g_tx_slot_start_ms + g_tx_tone_idx * 160;
   g_tx_last_ta_int = -1;
   g_tx_last_ta_frac = -1;
 
@@ -2177,9 +2191,9 @@ static void tx_tick() {
 
   // Advance to next tone
   g_tx_tone_idx++;
-  // Use += to maintain consistent 160ms intervals from TX start
-  // (using now_ms + 160 would accumulate timing errors if tx_tick() is delayed)
-  g_tx_next_tone_time += 160;
+  // Calculate next tone time from slot boundary to ensure TX ends at correct time
+  // This guarantees RX can start cleanly at the next slot boundary
+  g_tx_next_tone_time = g_tx_slot_start_ms + g_tx_tone_idx * 160;
 }
 
 static void draw_menu_view() {
