@@ -2,6 +2,7 @@
 #include "text.h"
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include "../common/stpcpy_compat.h"
 
 #define LOG_LEVEL LOG_WARN
@@ -46,6 +47,57 @@ static bool unpack58(uint64_t n58, const ftx_callsign_hash_interface_t* hash_if,
 
 static uint16_t packgrid(const char* grid4);
 static int unpackgrid(uint16_t igrid4, uint8_t ir, char* extra, ftx_field_t* extra_field_type);
+
+// --- ARRL Field Day (FT8 message types 0.3 / 0.4) helpers ---
+static void set_bits_be(uint8_t* dst, uint16_t start_bit, uint8_t nbits, uint32_t value);
+static bool fd_txnum_to_n3_n4(uint8_t tx_num, uint8_t* n3_out, uint8_t* n4_out);
+static bool fd_class_to_k3(char fd_class, uint8_t* k3_out);
+static bool fd_section_to_s7(const char* section, uint8_t* s7_out);
+
+// ARRL/RAC Section abbreviations in S7 order (WSJT-X / FT8 spec table).
+// Source list matches the common Fortran data statement ordering used by WSJT-X.
+static const char* const k_arrl_sections_s7[] = {
+    "AB",  "AK",  "AL",  "AR",  "AZ",  "BC",  "CO",  "CT",  "DE",  "EB",
+    "EMA", "ENY", "EPA", "EWA", "GA",  "GTA", "IA",  "ID",  "IL",  "IN",
+    "KS",  "KY",  "LA",  "LAX", "MAR", "MB",  "MDC", "ME",  "MI",  "MN",
+    "MO",  "MS",  "MT",  "NC",  "ND",  "NE",  "NFL", "NH",  "NL",  "NLI",
+    "NM",  "NNJ", "NNY", "NT",  "NTX", "NV",  "OH",  "OK",  "ONE", "ONN",
+    "ONS", "OR",  "ORG", "PAC", "PR",  "QC",  "RI",  "SB",  "SC",  "SCV",
+    "SD",  "SDG", "SF",  "SFL", "SJV", "SK",  "SNJ", "STX", "SV",  "TN",
+    "UT",  "VA",  "VI",  "VT",  "WCF", "WI",  "WMA", "WNY", "WPA", "WTX",
+    "WV",  "WWA", "WY",  "DX",
+};
+
+#define K_ARRL_SECTIONS_COUNT 84
+
+static bool fd_section_to_s7(const char* section, uint8_t* s7_out)
+{
+    if (!section || !s7_out) return false;
+
+    // Trim leading whitespace, copy token, uppercase
+    char tmp[8];
+    size_t n = 0;
+    while (*section && isspace((unsigned char)*section)) section++;
+    while (*section && n < sizeof(tmp) - 1)
+    {
+        if (isspace((unsigned char)*section)) break;
+        tmp[n++] = (char)toupper((unsigned char)*section++);
+    }
+    tmp[n] = '\0';
+    if (n == 0) return false;
+
+    const uint8_t count = (uint8_t)(sizeof(k_arrl_sections_s7) / sizeof(k_arrl_sections_s7[0]));
+    for (uint8_t i = 0; i < count; ++i)
+    {
+        if (equals(tmp, k_arrl_sections_s7[i]))
+        {
+            *s7_out = i;
+            return true;
+        }
+    }
+    return false;
+}
+
 
 /////////////////////////////////////////////////////////// Exported functions /////////////////////////////////////////////////////////////////
 
@@ -181,6 +233,27 @@ ftx_message_rc_t ftx_message_encode(ftx_message_t* msg, ftx_callsign_hash_interf
             return rc;
         LOG(LOG_DEBUG, "   ftx_message_encode_nonstd failed: %d\n", rc);
     }
+
+    // Try ARRL Field Day exchange (FT8 message types 0.3/0.4)
+    // Expected token patterns:
+    //   <to> <de> <tx><class> <section>          e.g. "W6ABC AG6AQ 1B SCV"
+    //   <to> <de> R <tx><class> <section>        e.g. "W6ABC AG6AQ R 1B SCV"
+    if (parse_position[0]) {
+        char fd_extra[24];
+        const char* rest = parse_position;
+        while (*rest == ' ') rest++;
+        // Compose "<extra> <rest>" into fd_extra
+        if (rest[0]) {
+            snprintf(fd_extra, sizeof(fd_extra), "%s %s", extra, rest);
+        } else {
+            snprintf(fd_extra, sizeof(fd_extra), "%s", extra);
+        }
+        rc = ftx_message_encode_arrl_fd(msg, hash_if, call_to, call_de, fd_extra);
+        if (rc == FTX_MESSAGE_RC_OK)
+            return rc;
+        LOG(LOG_DEBUG, "   ftx_message_encode_arrl_fd failed: %d\n", rc);
+    }
+
     rc = ftx_message_encode_free(msg, message_text);
     if (rc == FTX_MESSAGE_RC_OK)
         return rc;
@@ -250,6 +323,168 @@ ftx_message_rc_t ftx_message_encode_std(ftx_message_t* msg, ftx_callsign_hash_in
     msg->payload[9] = (uint8_t)(igrid4 << 6) | (uint8_t)(i3 << 3);
 
     return FTX_MESSAGE_RC_OK;
+}
+
+/// Encode Type 0.3/0.4 ARRL Field Day exchange message (wrapper that parses 'extra').
+ftx_message_rc_t ftx_message_encode_arrl_fd(ftx_message_t* msg,
+                                           ftx_callsign_hash_interface_t* hash_if,
+                                           const char* call_to,
+                                           const char* call_de,
+                                           const char* extra)
+{
+    if (!msg || !call_to || !call_de || !extra)
+        return FTX_MESSAGE_RC_ERROR_TYPE;
+
+    // Parse extra: "[R] <tx><class> <section>"
+    // Examples: "6A EMA" or "R 16B SCV" or "1D DX"
+    char buf[32];
+    strncpy(buf, extra, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+    char* p = trim(buf);
+
+    bool has_r = false;
+    char* tok1 = strtok(p, " ");
+    if (!tok1) return FTX_MESSAGE_RC_ERROR_TYPE;
+
+    char* exch = tok1;
+    char* tok2 = strtok(NULL, " ");
+    if (!tok2) return FTX_MESSAGE_RC_ERROR_TYPE;
+
+    if (equals(tok1, "R"))
+    {
+        has_r = true;
+        exch = tok2;
+        tok2 = strtok(NULL, " ");
+        if (!tok2) return FTX_MESSAGE_RC_ERROR_TYPE;
+    }
+
+    // No extra tokens allowed beyond section
+    char* tok3 = strtok(NULL, " ");
+    if (tok3) return FTX_MESSAGE_RC_ERROR_TYPE;
+
+    // Parse <tx><class>
+    size_t elen = strlen(exch);
+    if (elen < 2 || elen > 3) return FTX_MESSAGE_RC_ERROR_TYPE;
+
+    char class_ch = exch[elen - 1];
+    uint8_t tx_num = (uint8_t)atoi(exch);
+
+    // Parse section abbreviation into S7 index
+    uint8_t sec_s7 = 0;
+    if (!fd_section_to_s7(tok2, &sec_s7)) return FTX_MESSAGE_RC_ERROR_TYPE;
+
+    if (tx_num < 1 || tx_num > 32) return FTX_MESSAGE_RC_ERROR_TYPE;
+    if (!(class_ch >= 'A' && class_ch <= 'F')) return FTX_MESSAGE_RC_ERROR_TYPE;
+
+    return ftx_message_encode_arrl_fd_ex(msg, hash_if, call_to, call_de, has_r, tx_num, class_ch, sec_s7);
+}
+
+/// Same as ftx_message_encode_arrl_fd(), but takes already-parsed fields.
+ftx_message_rc_t ftx_message_encode_arrl_fd_ex(ftx_message_t* msg,
+                                              ftx_callsign_hash_interface_t* hash_if,
+                                              const char* call_to,
+                                              const char* call_de,
+                                              bool has_r,
+                                              uint8_t tx_num,
+                                              char fd_class,
+                                              uint8_t section_s7)
+{
+    if (!msg || !call_to || !call_de)
+        return FTX_MESSAGE_RC_ERROR_TYPE;
+
+    // Reject suffixes: 0.3/0.4 use pure c28 fields (no /P or /R bits).
+    uint8_t ip_to = 0, ip_de = 0;
+    int32_t n28_to = pack28(call_to, hash_if, &ip_to);
+    int32_t n28_de = pack28(call_de, hash_if, &ip_de);
+
+    if (n28_to < 0) return FTX_MESSAGE_RC_ERROR_CALLSIGN1;
+    if (n28_de < 0) return FTX_MESSAGE_RC_ERROR_CALLSIGN2;
+    if (ip_to || ip_de) return FTX_MESSAGE_RC_ERROR_SUFFIX;
+
+    // For Field Day exchange, calls should not be tokens like CQ/DE/QRZ.
+    if ((uint32_t)n28_to < NTOKENS || (uint32_t)n28_de < NTOKENS)
+        return FTX_MESSAGE_RC_ERROR_TYPE;
+
+    // Map tx_num to (n3,n4) per FT8 spec: n3=3 for 1..16, n3=4 for 17..32.
+    uint8_t n3 = 0, n4 = 0;
+    if (!fd_txnum_to_n3_n4(tx_num, &n3, &n4))
+        return FTX_MESSAGE_RC_ERROR_TYPE;
+
+    uint8_t k3 = 0;
+    if (!fd_class_to_k3(fd_class, &k3))
+        return FTX_MESSAGE_RC_ERROR_TYPE;
+
+    if (section_s7 > 127u)
+        return FTX_MESSAGE_RC_ERROR_TYPE;
+
+    memset(msg->payload, 0, sizeof(msg->payload));
+
+    // Bit layout (MSB-first):
+    // 0..27  c28_to
+    // 28..55 c28_de
+    // 56     R1
+    // 57..60 n4
+    // 61..63 k3
+    // 64..70 S7
+    // 71..73 n3
+    // 74..76 i3 (0)
+    set_bits_be(msg->payload, 0, 28, (uint32_t)n28_to);
+    set_bits_be(msg->payload, 28, 28, (uint32_t)n28_de);
+    set_bits_be(msg->payload, 56, 1, has_r ? 1u : 0u);
+    set_bits_be(msg->payload, 57, 4, (uint32_t)n4);
+    set_bits_be(msg->payload, 61, 3, (uint32_t)k3);
+    set_bits_be(msg->payload, 64, 7, (uint32_t)section_s7);
+    set_bits_be(msg->payload, 71, 3, (uint32_t)n3);
+    set_bits_be(msg->payload, 74, 3, 0u);
+
+    return FTX_MESSAGE_RC_OK;
+}
+
+/// --- ARRL Field Day (FT8 message types 0.3/0.4) helpers ---
+static void set_bits_be(uint8_t* dst, uint16_t start_bit, uint8_t nbits, uint32_t value)
+{
+    // start_bit 0 refers to MSB of dst[0].
+    for (uint8_t i = 0; i < nbits; ++i)
+    {
+        uint16_t bitpos = (uint16_t)(start_bit + i);
+        uint16_t byte = (uint16_t)(bitpos >> 3);
+        uint8_t bit_in_byte = (uint8_t)(7 - (bitpos & 7));
+        uint8_t mask = (uint8_t)(1u << bit_in_byte);
+        uint32_t src_bit = (value >> (nbits - 1 - i)) & 1u;
+        if (src_bit)
+            dst[byte] |= mask;
+        else
+            dst[byte] &= (uint8_t)(~mask);
+    }
+}
+
+static bool fd_txnum_to_n3_n4(uint8_t tx_num, uint8_t* n3_out, uint8_t* n4_out)
+{
+    if (!n3_out || !n4_out) return false;
+    if (tx_num >= 1 && tx_num <= 16)
+    {
+        *n3_out = 3;
+        *n4_out = (uint8_t)(tx_num - 1);
+        return true;
+    }
+    if (tx_num >= 17 && tx_num <= 32)
+    {
+        *n3_out = 4;
+        *n4_out = (uint8_t)(tx_num - 17);
+        return true;
+    }
+    return false;
+}
+
+static bool fd_class_to_k3(char fd_class, uint8_t* k3_out)
+{
+    if (!k3_out) return false;
+    if (fd_class >= 'A' && fd_class <= 'F')
+    {
+        *k3_out = (uint8_t)(fd_class - 'A');
+        return true;
+    }
+    return false;
 }
 
 ftx_message_rc_t ftx_message_encode_nonstd(ftx_message_t* msg, ftx_callsign_hash_interface_t* hash_if, const char* call_to, const char* call_de, const char* extra)
@@ -387,11 +622,88 @@ ftx_message_rc_t ftx_message_encode_telemetry(ftx_message_t* msg, const uint8_t*
     return FTX_MESSAGE_RC_OK;
 }
 
+static inline uint32_t get_bits_be(const uint8_t* b, int bitpos, int nbits)
+{
+    // bitpos: 0 == MSB of b[0], increasing to the right
+    // returns up to 32 bits
+    uint32_t v = 0;
+    for (int i = 0; i < nbits; ++i)
+    {
+        int p = bitpos + i;
+        uint8_t byte = b[p >> 3];
+        int shift = 7 - (p & 7);
+        v = (v << 1) | ((byte >> shift) & 1u);
+    }
+    return v;
+}
+
+ftx_message_rc_t ftx_message_decode_arrl_fd(
+    const ftx_message_t* msg,
+    ftx_callsign_hash_interface_t* hash_if,
+    char* call_to,
+    char* call_de,
+    char* extra,
+    ftx_field_t field_types[FTX_MAX_MESSAGE_FIELDS])
+{
+    call_to[0] = call_de[0] = extra[0] = '\0';
+
+    // bit layout (MSB-first over 77 bits):
+    // 0..27  : c28 (call_to)
+    // 28..55 : c28 (call_de)
+    // 56     : R1
+    // 57..60 : n4
+    // 61..63 : k3
+    // 64..70 : S7
+    // 71..73 : n3
+    // 74..76 : i3 (must be 0)
+
+    uint8_t i3 = (uint8_t)get_bits_be(msg->payload, 74, 3);
+    uint8_t n3 = (uint8_t)get_bits_be(msg->payload, 71, 3);
+    if (i3 != 0 || (n3 != 3 && n3 != 4))
+        return FTX_MESSAGE_RC_ERROR_TYPE;
+
+    uint32_t c28a = (uint32_t)get_bits_be(msg->payload, 0, 28);
+    uint32_t c28b = (uint32_t)get_bits_be(msg->payload, 28, 28);
+
+    uint8_t R1  = (uint8_t)get_bits_be(msg->payload, 56, 1);
+    uint8_t n4  = (uint8_t)get_bits_be(msg->payload, 57, 4);
+    uint8_t k3  = (uint8_t)get_bits_be(msg->payload, 61, 3);
+    uint8_t S7  = (uint8_t)get_bits_be(msg->payload, 64, 7);
+
+    // Unpack both callsigns (c28 = n28<<1 | ipa)
+    if (unpack28(c28a, 0, i3, hash_if, call_to, &field_types[0]) < 0)
+        return FTX_MESSAGE_RC_ERROR_CALLSIGN1;
+
+    if (unpack28(c28b, 0, i3, hash_if, call_de, &field_types[1]) < 0)
+        return FTX_MESSAGE_RC_ERROR_CALLSIGN2;
+
+    // tx number mapping: n3 selects range
+    int tx_num = (n3 == 3) ? ((int)n4 + 1) : ((int)n4 + 17);
+    if (tx_num < 1 || tx_num > 32) return FTX_MESSAGE_RC_ERROR_TYPE;
+
+    // class A..F
+    if (k3 > 5) return FTX_MESSAGE_RC_ERROR_TYPE;
+    char cls = (char)('A' + k3);
+
+    // section from your table (S7 is index)
+    if (S7 >= K_ARRL_SECTIONS_COUNT) return FTX_MESSAGE_RC_ERROR_TYPE;
+    const char* sec = k_arrl_sections_s7[S7];
+
+    // format "extra" exactly like WSJT-X style
+    if (R1)
+        snprintf(extra, 14, "R %d%c %s", tx_num, cls, sec);
+    else
+        snprintf(extra, 14, "%d%c %s", tx_num, cls, sec);
+
+    field_types[2] = FTX_FIELD_UNKNOWN; // (or whatever you use for “non-grid extra”)
+    return FTX_MESSAGE_RC_OK;
+}
+
 ftx_message_rc_t ftx_message_decode(const ftx_message_t* msg, ftx_callsign_hash_interface_t* hash_if, char* message, ftx_message_offsets_t* offsets)
 {
     ftx_message_rc_t rc;
 
-    char buf[42]; // 13 + 13 + 6 (std/nonstd) / 14 (free text) / 19 (telemetry)
+    char buf[35]; // 13 + 13 + 6 (std/nonstd) / 14 (free text) / 19 (telemetry)
     char* field1 = buf;
     char* field2 = buf + 14;
     char* field3 = buf + 14 + 14;
@@ -418,6 +730,10 @@ ftx_message_rc_t ftx_message_decode(const ftx_message_t* msg, ftx_callsign_hash_
         field3 = NULL;
         rc = FTX_MESSAGE_RC_OK;
         break;
+    case FTX_MESSAGE_TYPE_ARRL_FD:
+        rc = ftx_message_decode_arrl_fd(msg, hash_if, field1, field2, field3, offsets->types);
+        break;
+    
     case FTX_MESSAGE_TYPE_TELEMETRY:
         ftx_message_decode_telemetry_hex(msg, field1);
         field2 = NULL;
@@ -600,6 +916,7 @@ void ftx_message_decode_free(const ftx_message_t* msg, char* text)
 
     strcpy(text, trim(c14));
 }
+
 
 void ftx_message_decode_telemetry_hex(const ftx_message_t* msg, char* telemetry_hex)
 {

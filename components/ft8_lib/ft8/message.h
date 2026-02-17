@@ -135,6 +135,28 @@ ftx_message_rc_t ftx_message_encode(ftx_message_t* msg, ftx_callsign_hash_interf
 /// - nonstandard calls within <> brackets are allowed, if they don't contain '/'
 ftx_message_rc_t ftx_message_encode_std(ftx_message_t* msg, ftx_callsign_hash_interface_t* hash_if, const char* call_to, const char* call_de, const char* extra);
 
+/// Pack Type 0.3 / 0.4 (ARRL Field Day FT8 exchange) message.
+/// call_to = destination callsign, call_de = source callsign.
+/// extra format: "[R] <tx><class> <section>" where:
+///  - optional leading 'R' selects message type 0.4 (with R); otherwise 0.3
+///  - <tx><class> is 1..32 followed immediately by class letter A..F (e.g. "6A", "16B", "32F")
+///  - <section> is an ARRL/RAC section abbreviation (e.g. "EMA", "SCV", "WMA", "DX").
+ftx_message_rc_t ftx_message_encode_arrl_fd(ftx_message_t* msg,
+                                           ftx_callsign_hash_interface_t* hash_if,
+                                           const char* call_to,
+                                           const char* call_de,
+                                           const char* extra);
+
+/// Same as ftx_message_encode_arrl_fd(), but takes already-parsed fields.
+ftx_message_rc_t ftx_message_encode_arrl_fd_ex(ftx_message_t* msg,
+                                              ftx_callsign_hash_interface_t* hash_if,
+                                              const char* call_to,
+                                              const char* call_de,
+                                              bool has_r,
+                                              uint8_t tx_num,
+                                              char fd_class,
+                                              uint8_t section_s7);
+
 /// Pack Type 4 (One nonstandard call and one hashed call) message
 ftx_message_rc_t ftx_message_encode_nonstd(ftx_message_t* msg, ftx_callsign_hash_interface_t* hash_if, const char* call_to, const char* call_de, const char* extra);
 
