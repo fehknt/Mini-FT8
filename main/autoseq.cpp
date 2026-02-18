@@ -12,6 +12,7 @@
 #include <cstdarg>
 #include "esp_log.h"
 #include <string>
+#include <unordered_map>
 
 //void debug_log_line_public(const std::string& msg);
 static const char* TAG = "AUTOSEQ";
@@ -32,6 +33,13 @@ static std::string s_cq_freetext;
 
 // ADIF callback
 static AdifLogCallback s_adif_callback;
+
+// Cabrillo Field Day callback (for ARRL-FD logging)
+using CabrilloFdLogCallback = void (*)(const std::string& dxcall, const std::string& their_fd_exchange);
+static CabrilloFdLogCallback s_cabrillo_fd_callback = nullptr;
+
+// Track latest received FD exchange per dxcall
+static std::unordered_map<std::string, std::string> s_fd_rx_exchange;
 
 // TX scheduling state
 static bool s_pending_valid = false;
@@ -359,6 +367,11 @@ void autoseq_set_adif_callback(AdifLogCallback cb) {
     s_adif_callback = cb;
 }
 
+
+void autoseq_set_cabrillo_fd_callback(CabrilloFdLogCallback cb) {
+    s_cabrillo_fd_callback = cb;
+}
+
 void autoseq_set_station(const std::string& call, const std::string& grid) {
     s_my_call = call;
     s_my_grid = grid;
@@ -446,6 +459,50 @@ static void format_tx_text(QsoContext* ctx, TxMsgType id, std::string& out) {
     }
 }
 
+static inline std::string trim_copy(const std::string& s) {
+    size_t a = 0, b = s.size();
+    while (a < b && (s[a] == ' ' || s[a] == '\t' || s[a] == '\r' || s[a] == '\n')) ++a;
+    while (b > a && (s[b-1] == ' ' || s[b-1] == '\t' || s[b-1] == '\r' || s[b-1] == '\n')) --b;
+    return s.substr(a, b - a);
+}
+
+// Parse "1B SCV" or "R 1B SCV". Returns normalized exchange without leading "R " (e.g. "1B SCV").
+static bool parse_fd_exchange(const std::string& in, std::string& out_norm) {
+    std::string s = trim_copy(in);
+    if (s.empty()) return false;
+    if (s.size() >= 2 && (s[0] == 'R') && (s[1] == ' ')) {
+        s = trim_copy(s.substr(2));
+    }
+    // Expect: "<num><class> <section>"
+    size_t sp = s.find(' ');
+    if (sp == std::string::npos) return false;
+    std::string tok1 = s.substr(0, sp);
+    std::string tok2 = trim_copy(s.substr(sp + 1));
+    if (tok1.size() < 2 || tok2.empty()) return false;
+
+    char cls = tok1.back();
+    if (cls < 'A' || cls > 'F') return false;
+
+    int num = 0;
+    for (size_t i = 0; i + 1 < tok1.size(); ++i) {
+        char c = tok1[i];
+        if (c < '0' || c > '9') return false;
+        num = num * 10 + (c - '0');
+        if (num > 99) return false;
+    }
+    if (num < 1 || num > 32) return false;
+
+    // Section: typically 2-3 chars (or "DX"), accept 2-4 alnum.
+    if (tok2.size() < 2 || tok2.size() > 4) return false;
+    for (char c : tok2) {
+        if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))) return false;
+    }
+
+    out_norm = tok1 + " " + tok2;
+    return true;
+}
+
+
 static TxMsgType parse_rcvd_msg(QsoContext* ctx, const UiRxLine& msg) {
     TxMsgType rcvd = TxMsgType::TX_UNDEF;
     // Normalize field3 to uppercase for comparison
@@ -480,12 +537,31 @@ static TxMsgType parse_rcvd_msg(QsoContext* ctx, const UiRxLine& msg) {
         }
     }
 
+    // Field Day: capture received exchange text ("1B SCV" or "R 1B SCV")
+    if (s_cq_type == AutoseqCqType::FD) {
+        std::string norm;
+        if (parse_fd_exchange(msg.field3, norm) && !ctx->dxcall.empty()) {
+            s_fd_rx_exchange[ctx->dxcall] = norm;
+        }
+    }
+
     ctx->rcvd_msg_type = rcvd;
     return rcvd;
 }
 
+
+
 static void log_qso_if_needed(QsoContext* ctx) {
     if (ctx->logged) return;
+
+    // Cabrillo Field Day log (optional, independent of ADIF)
+    if (s_cq_type == AutoseqCqType::FD && s_cabrillo_fd_callback && !ctx->dxcall.empty()) {
+        auto it = s_fd_rx_exchange.find(ctx->dxcall);
+        if (it != s_fd_rx_exchange.end()) {
+            s_cabrillo_fd_callback(ctx->dxcall, it->second);
+        }
+    }
+
     if (!s_adif_callback) return;
 
     ctx->logged = true;

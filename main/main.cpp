@@ -407,7 +407,7 @@ static esp_err_t delete_logs_on_spiffs_keep_stationdata() {
     const char* name = ent->d_name;
     if (!name || name[0] == '.') continue;
 
-    if (ends_with_adi(name) || strcmp(name, "RxTxLog.txt") == 0) {
+    if (ends_with_adi(name) || strcmp(name, "RxTxLog.txt") == 0 || strcmp(name, "fieldday.log") == 0) {
       std::string path = std::string("/spiffs/") + name;
       unlink(path.c_str());  // ignore missing/err
     }
@@ -787,6 +787,164 @@ void log_heap(const char* tag) {
   size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
   ESP_LOGI(tag, "HEAP: free=%u min=%u largest=%u", (unsigned)free_sz, (unsigned)min_free, (unsigned)largest);
 }
+static std::string fd_trim(const std::string& s) {
+  size_t a = 0, b = s.size();
+  while (a < b && (s[a] == ' ' || s[a] == '\t' || s[a] == '\r' || s[a] == '\n')) ++a;
+  while (b > a && (s[b-1] == ' ' || s[b-1] == '\t' || s[b-1] == '\r' || s[b-1] == '\n')) --b;
+  return s.substr(a, b - a);
+}
+
+static std::string fd_strip_R(const std::string& s) {
+  std::string t = fd_trim(s);
+  if (t.size() >= 2 && t[0] == 'R' && t[1] == ' ') return fd_trim(t.substr(2));
+  return t;
+}
+
+static std::string fd_get_section_from_exchange(const std::string& ex) {
+  // ex: "1B SCV" (or "R 1B SCV")
+  std::string t = fd_strip_R(ex);
+  size_t sp = t.find(' ');
+  if (sp == std::string::npos) return "DX";
+  return fd_trim(t.substr(sp + 1));
+}
+
+static void cabrillo_fd_ensure_header(const char* path, const std::string& mycall, const std::string& location) {
+  struct stat st;
+  if (stat(path, &st) == 0) return;
+
+  FILE* f = fopen(path, "w");
+  if (!f) return;
+
+  fprintf(f, "START-OF-LOG: 3.0\n");
+  fprintf(f, "CREATED-BY: Mini-FT8\n");
+  fprintf(f, "CONTEST: ARRL-FIELD-DAY\n");
+  fprintf(f, "CALLSIGN: %s\n", mycall.c_str());
+  fprintf(f, "CATEGORY-OPERATOR: SINGLE-OP\n");
+  fprintf(f, "CATEGORY-TRANSMITTER: ONE\n");
+  fprintf(f, "CATEGORY-ASSISTED: NON-ASSISTED\n");
+  fprintf(f, "CATEGORY-BAND: ALL\n");
+  fprintf(f, "CATEGORY-MODE: MIXED\n");
+  fprintf(f, "CATEGORY-POWER: LOW\n");
+  fprintf(f, "CATEGORY-STATION: PORTABLE\n");
+  fprintf(f, "LOCATION: %s\n", location.c_str());
+  fprintf(f, "OPERATORS: %s\n", mycall.c_str());
+  fprintf(f, "END-OF-LOG:\n");
+  fclose(f);
+}
+
+static bool cabrillo_fd_truncate_end_marker(FILE* f) {
+  if (!f) return false;
+
+  if (fseek(f, 0, SEEK_END) != 0) return false;
+  long file_end = ftell(f);
+  if (file_end <= 0) return false;
+
+  const long kMaxTail = 256;
+  long tail_start = (file_end > kMaxTail) ? (file_end - kMaxTail) : 0;
+
+  if (fseek(f, tail_start, SEEK_SET) != 0) return false;
+
+  std::string tail;
+  tail.resize((size_t)(file_end - tail_start));
+  size_t n = fread(tail.data(), 1, tail.size(), f);
+  tail.resize(n);
+
+  // Find end of last non-empty line
+  size_t line_end = tail.size();
+  while (line_end > 0 && (tail[line_end - 1] == '\n' || tail[line_end - 1] == '\r')) {
+    line_end--;
+  }
+  if (line_end == 0) return false;
+
+  size_t line_start = tail.rfind('\n', line_end - 1);
+  line_start = (line_start == std::string::npos) ? 0 : (line_start + 1);
+
+  std::string last = tail.substr(line_start, line_end - line_start);
+  if (last != "END-OF-LOG:") return false;
+
+  long truncate_at = tail_start + (long)line_start;
+  int fd = fileno(f);
+  if (fd < 0) return false;
+  if (ftruncate(fd, truncate_at) != 0) return false;
+
+  // Seek to new end
+  fseek(f, 0, SEEK_END);
+  return true;
+}
+
+static void cabrillo_fd_append_qso_with_end(const char* path, const std::string& qso_line) {
+  FILE* f = fopen(path, "r+");
+  if (!f) {
+    f = fopen(path, "a+");
+    if (!f) return;
+  }
+
+  // Remove trailing END-OF-LOG if present
+  cabrillo_fd_truncate_end_marker(f);
+
+  // Append QSO and END-OF-LOG
+  fseek(f, 0, SEEK_END);
+
+  // Ensure newline separation
+  long end = ftell(f);
+  if (end > 0) {
+    if (fseek(f, -1, SEEK_END) == 0) {
+      int c = fgetc(f);
+      fseek(f, 0, SEEK_END);
+      if (c != '\n') fputc('\n', f);
+    } else {
+      fseek(f, 0, SEEK_END);
+    }
+  }
+
+  fprintf(f, "%s\n", qso_line.c_str());
+  fprintf(f, "END-OF-LOG:\n");
+  fclose(f);
+}
+
+// Called by autoseq when an FD QSO completes. We derive freq/time from current radio state
+// and use FreeText as our FD exchange (e.g. "1B SCV").
+static void log_cabrillo_fd_entry(const std::string& dxcall, const std::string& their_fd_exchange) {
+  if (g_cq_type != CqType::CQFD) return;
+
+  const std::string my_fd = fd_strip_R(g_free_text);
+  const std::string their_fd = fd_strip_R(their_fd_exchange);
+
+  if (my_fd.empty() || their_fd.empty() || dxcall.empty()) return;
+
+  // Time (UTC assumed as RTC timebase, same as ADIF writer)
+  time_t now = (time_t)(rtc_now_ms() / 1000);
+  struct tm t;
+  localtime_r(&now, &t);
+
+  char date_ymd[16];
+  snprintf(date_ymd, sizeof(date_ymd), "%04d-%02d-%02d",
+           (t.tm_year + 1900) % 10000, (t.tm_mon + 1) % 100, t.tm_mday % 100);
+
+  char time_hhmm[8];
+  snprintf(time_hhmm, sizeof(time_hhmm), "%02d%02d", t.tm_hour % 100, t.tm_min % 100);
+
+  // Frequency: use selected band dial frequency (kHz)
+  int freq_khz = (int)g_bands[g_band_sel].freq;
+
+  const char* path = "/spiffs/fieldday.log";
+
+  std::string location = fd_get_section_from_exchange(my_fd);
+  cabrillo_fd_ensure_header(path, g_call, location);
+
+  char qso_line[128];
+  snprintf(qso_line, sizeof(qso_line), "QSO: %d DG %s %s %s %s %s %s",
+           freq_khz,
+           date_ymd,
+           time_hhmm,
+           g_call.c_str(),
+           my_fd.c_str(),
+           dxcall.c_str(),
+           their_fd.c_str());
+
+  cabrillo_fd_append_qso_with_end(path, qso_line);
+}
+
 #else
 static inline void log_heap(const char*) {}
 #endif
@@ -2925,7 +3083,14 @@ static void app_task_core0(void* /*param*/) {
 
   // Initialize autoseq engine
   autoseq_init();
-  autoseq_set_adif_callback(log_adif_entry);
+  
+// Cabrillo Field Day log callback (implemented in autoseq.cpp; declared here to avoid header churn)
+using CabrilloFdLogCallback = void (*)(const std::string& dxcall, const std::string& their_fd_exchange);
+extern void autoseq_set_cabrillo_fd_callback(CabrilloFdLogCallback cb);
+
+autoseq_set_adif_callback(log_adif_entry);
+autoseq_set_cabrillo_fd_callback(log_cabrillo_fd_entry);
+
 
   ui_mode = UIMode::RX;
   load_station_data();
