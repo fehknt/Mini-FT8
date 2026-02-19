@@ -100,20 +100,21 @@ bool autoseq_drop_index(int idx) {
 
 bool autoseq_rotate_same_parity() {
     if (s_queue_size < 2) return false;
+
     int parity = s_queue[0].slot_id & 1;
-    int found = -1;
+
+    int last = -1;
     for (int i = 1; i < s_queue_size; ++i) {
-        if ((s_queue[i].slot_id & 1) == parity) {
-            found = i;
-            break;
-        }
+        if ((s_queue[i].slot_id & 1) == parity) last = i;
+        else break; // optional: only rotate within the front same-parity run
     }
-    if (found == -1) return false;
-    QsoContext tmp = s_queue[found];
-    for (int i = found; i > 0; --i) {
-        s_queue[i] = s_queue[i - 1];
+    if (last == -1) return false;
+
+    QsoContext head = s_queue[0];
+    for (int i = 0; i < last; ++i) {
+        s_queue[i] = s_queue[i + 1];
     }
-    s_queue[0] = tmp;
+    s_queue[last] = head;
     return true;
 }
 
