@@ -27,6 +27,10 @@ static std::string s_my_call;
 static std::string s_my_grid;
 static bool s_skip_tx1 = false;
 
+// Forward declarations (must appear before format_tx_text uses them)
+static std::string trim_copy(const std::string& s);
+static bool parse_fd_exchange(const std::string& in, std::string& out);
+
 // CQ configuration
 static AutoseqCqType s_cq_type = AutoseqCqType::CQ;
 static std::string s_cq_freetext;
@@ -178,6 +182,14 @@ void autoseq_on_touch(const UiRxLine& msg) {
     ctx->snr_tx = msg.snr;  // Our measurement of their signal
     ctx->offset_hz = msg.offset_hz;
     ctx->slot_id = msg.slot_id ^ 1;  // TX on opposite slot
+
+    // Mark this QSO as Field Day only if the *received* message is CQ FD
+    // (This avoids sending FD exchange when answering a normal CQ while our CQType is FD.)
+    {
+        // CQ FD will be parsed as field1="FD", field2="<DXCALL>"
+        std::string f1 = msg.field1;
+        for (auto& ch : f1) ch = toupper((unsigned char)ch);
+        ctx->is_fd = (f1 == "FD");    }
 
     //dlogf("TH: %s %s %s snr=%d",
     //  msg.field1.c_str(), msg.field2.c_str(), msg.field3.c_str(), msg.snr);
@@ -410,15 +422,37 @@ static void format_tx_text(QsoContext* ctx, TxMsgType id, std::string& out) {
             break;
 
         case TxMsgType::TX2:
-            snprintf(buf, sizeof(buf), "%s %s %+d",
-                     ctx->dxcall.c_str(), s_my_call.c_str(), ctx->snr_tx);
-            out = buf;
+            if (ctx->is_fd) {
+                // Field Day: send our exchange (from CQ freetext) instead of SNR report
+                std::string myex;
+                if (!parse_fd_exchange(s_cq_freetext, myex)) {
+                    myex = trim_copy(s_cq_freetext);
+                }
+                snprintf(buf, sizeof(buf), "%s %s %s",
+                         ctx->dxcall.c_str(), s_my_call.c_str(), myex.c_str());
+                out = buf;
+            } else {
+                snprintf(buf, sizeof(buf), "%s %s %+d",
+                         ctx->dxcall.c_str(), s_my_call.c_str(), ctx->snr_tx);
+                out = buf;
+            }
             break;
 
         case TxMsgType::TX3:
-            snprintf(buf, sizeof(buf), "%s %s R%+d",
-                     ctx->dxcall.c_str(), s_my_call.c_str(), ctx->snr_tx);
-            out = buf;
+            if (ctx->is_fd) {
+                // Field Day: acknowledge with 'R' + our exchange
+                std::string myex;
+                if (!parse_fd_exchange(s_cq_freetext, myex)) {
+                    myex = trim_copy(s_cq_freetext);
+                }
+                snprintf(buf, sizeof(buf), "%s %s R %s",
+                         ctx->dxcall.c_str(), s_my_call.c_str(), myex.c_str());
+                out = buf;
+            } else {
+                snprintf(buf, sizeof(buf), "%s %s R%+d",
+                         ctx->dxcall.c_str(), s_my_call.c_str(), ctx->snr_tx);
+                out = buf;
+            }
             break;
 
         case TxMsgType::TX4:
@@ -505,58 +539,61 @@ static bool parse_fd_exchange(const std::string& in, std::string& out_norm) {
 
 
 static TxMsgType parse_rcvd_msg(QsoContext* ctx, const UiRxLine& msg) {
+
+
+
     TxMsgType rcvd = TxMsgType::TX_UNDEF;
-    // Normalize field3 to uppercase for comparison
+
     std::string f3 = msg.field3;
     for (auto& ch : f3) ch = toupper((unsigned char)ch);
 
-    // Check specific keywords FIRST before grid pattern
-    // (RR73 matches grid pattern AA00 but is actually TX4!)
+    // Keywords first
     if (f3 == "RR73" || f3 == "RRR") {
         rcvd = TxMsgType::TX4;
     } else if (f3 == "73") {
         rcvd = TxMsgType::TX5;
-    } else if (looks_like_grid(f3)) {
-        rcvd = TxMsgType::TX1;
-        // Only update grid if we don't have one yet (preserve from initial exchange)
-        if (ctx->dxgrid.empty()) {
-            ctx->dxgrid = f3;
-        }
-    } else if (!f3.empty() && f3[0] == 'R' && f3.size() > 1) {
-        // Check if it's R+report (TX3)
-        int rpt = 0;
-        if (looks_like_report(f3.substr(1), rpt)) {
-            rcvd = TxMsgType::TX3;
-            ctx->snr_rx = rpt;  // What they reported about us
-        }
     } else {
-        // Check for plain report (TX2)
-        int rpt = 0;
-        if (looks_like_report(f3, rpt)) {
-            rcvd = TxMsgType::TX2;
-            ctx->snr_rx = rpt;  // What they reported about us
-        }
-    }
-
-    // Field Day: capture received exchange text ("1B SCV" or "R 1B SCV")
-    if (s_cq_type == AutoseqCqType::FD) {
+        // FD exchange shortcut
         std::string norm;
-        if (parse_fd_exchange(msg.field3, norm) && !ctx->dxcall.empty()) {
+        if (ctx && parse_fd_exchange(msg.field3, norm) && !ctx->dxcall.empty()) {
             s_fd_rx_exchange[ctx->dxcall] = norm;
+
+            std::string t = trim_copy(msg.field3);
+            if (!t.empty() && (t[0] == 'R' || t[0] == 'r')) rcvd = TxMsgType::TX3;
+            else rcvd = TxMsgType::TX2;
+
+            ctx->rcvd_msg_type = rcvd;
+            return rcvd;
+        }
+
+        // Normal FT8
+        if (looks_like_grid(f3)) {
+            rcvd = TxMsgType::TX1;
+            if (ctx && ctx->dxgrid.empty()) ctx->dxgrid = f3;
+        } else if (!f3.empty() && f3[0] == 'R' && f3.size() > 1) {
+            int rpt = 0;
+            if (looks_like_report(f3.substr(1), rpt)) {
+                rcvd = TxMsgType::TX3;
+                if (ctx) ctx->snr_rx = rpt;
+            }
+        } else {
+            int rpt = 0;
+            if (looks_like_report(f3, rpt)) {
+                rcvd = TxMsgType::TX2;
+                if (ctx) ctx->snr_rx = rpt;
+            }
         }
     }
 
-    ctx->rcvd_msg_type = rcvd;
+    if (ctx) ctx->rcvd_msg_type = rcvd;
     return rcvd;
 }
 
-
-
 static void log_qso_if_needed(QsoContext* ctx) {
-    if (ctx->logged) return;
+    if (!ctx || ctx->logged) return;
 
     // Cabrillo Field Day log (optional, independent of ADIF)
-    if (s_cq_type == AutoseqCqType::FD && s_cabrillo_fd_callback && !ctx->dxcall.empty()) {
+    if (ctx->is_fd && s_cabrillo_fd_callback && !ctx->dxcall.empty()) {
         auto it = s_fd_rx_exchange.find(ctx->dxcall);
         if (it != s_fd_rx_exchange.end()) {
             s_cabrillo_fd_callback(ctx->dxcall, it->second);
@@ -596,6 +633,15 @@ static bool generate_response(QsoContext* ctx, const UiRxLine& msg, bool overrid
         ctx->dxcall = dxcall;
         ctx->offset_hz = msg.offset_hz;
         ctx->slot_id = msg.slot_id ^ 1;  // TX on opposite slot
+
+    // Mark this QSO as Field Day only if the *received* message is CQ FD
+    // (This avoids sending FD exchange when answering a normal CQ while our CQType is FD.)
+    {
+        std::string f1 = msg.field1;
+        for (auto& ch : f1) ch = toupper((unsigned char)ch);
+        // Accept both "CQ FD" and "CQFD" (some decoders may omit the space)
+        ctx->is_fd = (f1 == "CQ FD" || f1 == "CQFD" || (f1.rfind("CQ FD", 0) == 0));
+    }
 
         // Reset state based on received message type
         switch (rcvd) {

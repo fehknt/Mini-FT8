@@ -65,6 +65,7 @@ extern "C" {
 #include "nvs_flash.h"
 #include "soc/soc_caps.h"
 #include "esp_bt.h"
+
 #endif
 #ifndef FT8_SAMPLE_RATE
 #define FT8_SAMPLE_RATE 12000
@@ -668,7 +669,7 @@ static std::vector<std::string> g_ctrl_lines = {
 };
 
 static std::vector<std::string> g_startup_lines = {
-    "Mini-FT8 V1.3.4",
+    "Mini-FT8 V1.3.5",
     "S: Status(Operate)",
     "R: Rx page",
     "T: Tx page",
@@ -1844,15 +1845,30 @@ void decode_monitor_results(monitor_t* mon, const monitor_config_t* cfg, bool up
       if (short_token) {
         line.field1 = toks[1];
         if (toks.size() > 2) line.field2 = toks[2];
-        if (toks.size() > 3) line.field3 = toks[3];
+
+        // field3 = remainder starting at toks[3]
+        if (toks.size() > 3) {
+          line.field3.clear();
+          for (size_t i = 3; i < toks.size(); ++i) {
+            if (i > 3) line.field3.push_back(' ');
+            line.field3 += toks[i];
+          }
+        }
         return;
       }
     }
 
-    // Default: first 3 tokens
+    // Default: first 2 tokens + remainder as field3
     if (!toks.empty()) line.field1 = toks[0];
     if (toks.size() > 1) line.field2 = toks[1];
-    if (toks.size() > 2) line.field3 = toks[2];
+    if (toks.size() > 2) {
+      line.field3.clear();
+      for (size_t i = 2; i < toks.size(); ++i) {
+        if (i > 2) line.field3.push_back(' ');
+        line.field3 += toks[i];
+      }
+    }
+    
   };
 
   // ---- local message de-duplication like reference decode() ----
@@ -2078,9 +2094,9 @@ void decode_monitor_results(monitor_t* mon, const monitor_config_t* cfg, bool up
   }
 
 #ifdef DEBUG_LOG
-    char buf[32];
-    snprintf(buf, sizeof(buf), "HashTableSize %d", callsign_hashtable_size);
-    debug_log_line_public(buf);
+    //char buf[32];
+    //snprintf(buf, sizeof(buf), "HashTableSize %d", callsign_hashtable_size);
+    //debug_log_line_public(buf);
 #endif
 
   g_decode_in_progress = false;  // Allow TX trigger now that decode is complete

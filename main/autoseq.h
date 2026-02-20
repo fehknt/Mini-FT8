@@ -48,6 +48,7 @@ struct QsoContext {
     int retry_counter = 0;
     int retry_limit = AUTOSEQ_MAX_RETRY;
     bool logged = false;    // Prevents duplicate ADIF logging
+    bool is_fd = false;
 
     int offset_hz = 1500;   // TX audio offset
     int slot_id = 0;        // TX slot (0=even, 1=odd)
