@@ -130,8 +130,8 @@ Tags (digits removed, last 2 chars):
 
 ### Example C: Allowing spaces in REF
 - … report exchange …
-- N6HAN → `W6/CC-072 AQAN`  *(REF contains a space; tail is still `AQAN`)*
-- AG6AQ → `W6/CC-052 ANAQ` *(or normal `73`)*
+- N6HAN → `W6/CC072 AQAN`  *(REF contains a space; tail is still `AQAN`)*
+- AG6AQ → `W6/CC052 ANAQ` *(or normal `73`)*
 - done
 
 ---
