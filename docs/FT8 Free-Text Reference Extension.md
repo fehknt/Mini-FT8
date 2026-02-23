@@ -125,8 +125,8 @@ Tags (digits removed, last 2 chars):
 ### Example B: N6HAN sends FTRX as sign-off (replacing RR73)
 - N6HAN → `AG6AQ N6HAN -10`
 - AG6AQ → `N6HAN AG6AQ R-12`
-- N6HAN → `W6/CC-052AQAN`  *(FTRX replaces N6HAN’s RR73)*
-- AG6AQ → `W6/CC-072ANAQ` *(or `N6HAN AG6AQ 73`)*
+- N6HAN → `W6/CC-072AQAN`  *(FTRX replaces N6HAN’s RR73)*
+- AG6AQ → `W6/CC-052ANAQ` *(or `N6HAN AG6AQ 73`)*
 
 ### Example C: Allowing spaces in REF
 - … report exchange …
