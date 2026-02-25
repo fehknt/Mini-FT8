@@ -701,6 +701,12 @@ static bool generate_response(QsoContext* ctx, const UiRxLine& msg, bool overrid
 
         case AutoseqState::REPORT:  // We sent TX2
             switch (rcvd) {
+                case TxMsgType::TX2:
+                    // DX sent their own report (no R prefix) — they either
+                    // didn't copy our TX2 or changed from TX1 to TX2.
+                    // Both sides have exchanged reports; advance to TX3.
+                    set_state(ctx, AutoseqState::ROGER_REPORT, TxMsgType::TX3, AUTOSEQ_MAX_RETRY);
+                    return true;
                 case TxMsgType::TX3:
                     set_state(ctx, AutoseqState::ROGERS, TxMsgType::TX4, AUTOSEQ_MAX_RETRY);
                     return true;
@@ -812,7 +818,11 @@ static void on_decode(const UiRxLine& msg) {
 // Comparison for std::sort: IDLE at top (to be popped), CALLING at bottom
 // Returns true if left should come before right
 static bool compare_ctx(const QsoContext& left, const QsoContext& right) {
-    // Same state? Lower retry count wins (gets priority)
+    // Same state? Lower retry count gets priority — round-robin among
+    // contacts so we probe for viable propagation paths rather than
+    // burning all retries on one potentially dead contact.
+    // State priority (below) ensures responsive contacts that advance
+    // in the QSO sequence still get completed first.
     if (left.state == right.state) {
         return left.retry_counter < right.retry_counter;
     }
