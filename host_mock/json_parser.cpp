@@ -45,6 +45,8 @@ bool load_test_data(const std::string& filename, TestData& out) {
         out.config.dx_callsign = c.value("DX_CALLSIGN", "");
         out.config.dx_grid     = c.value("DX_GRID", "");
         out.config.tx_on_even  = c.value("TX_ON_EVEN", false);
+        out.config.cq_type    = c.value("CQ_TYPE", "");
+        out.config.free_text  = c.value("FREE_TEXT", "");
     }
 
     // --- periods ---

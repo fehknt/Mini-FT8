@@ -14,6 +14,8 @@ struct TestConfig {
     std::string dx_callsign;
     std::string dx_grid;
     bool        tx_on_even = false;
+    std::string cq_type;       // "CQ", "FD", "SOTA", etc.
+    std::string free_text;     // FD exchange or freetext (e.g. "1A SCV")
 };
 
 struct BeaconChange {

@@ -39,7 +39,6 @@ static std::string s_cq_freetext;
 static AdifLogCallback s_adif_callback;
 
 // Cabrillo Field Day callback (for ARRL-FD logging)
-using CabrilloFdLogCallback = void (*)(const std::string& dxcall, const std::string& their_fd_exchange);
 static CabrilloFdLogCallback s_cabrillo_fd_callback = nullptr;
 
 // Track latest received FD exchange per dxcall
@@ -186,10 +185,11 @@ void autoseq_on_touch(const UiRxLine& msg) {
     // Mark this QSO as Field Day only if the *received* message is CQ FD
     // (This avoids sending FD exchange when answering a normal CQ while our CQType is FD.)
     {
-        // CQ FD will be parsed as field1="FD", field2="<DXCALL>"
         std::string f1 = msg.field1;
         for (auto& ch : f1) ch = toupper((unsigned char)ch);
-        ctx->is_fd = (f1 == "FD");    }
+        // Handle both "FD" (decoder strips CQ prefix) and "CQ FD" (raw format)
+        ctx->is_fd = (f1 == "FD" || f1 == "CQ FD" || f1.rfind("CQ FD", 0) == 0);
+    }
 
     //dlogf("TH: %s %s %s snr=%d",
     //  msg.field1.c_str(), msg.field2.c_str(), msg.field3.c_str(), msg.snr);
@@ -610,6 +610,15 @@ static void log_qso_if_needed(QsoContext* ctx) {
 }
 
 static bool generate_response(QsoContext* ctx, const UiRxLine& msg, bool override) {
+    // Get DX callsign from field2 (the sender), normalize to handle <> wrapped hashed calls
+    std::string dxcall = normalize_call_token(msg.field2);
+    if (dxcall.empty()) dxcall = normalize_call_token(msg.field1);
+
+    // Set dxcall BEFORE parse_rcvd_msg so FD exchange check sees a non-empty dxcall
+    if (override && ctx->dxcall.empty()) {
+        ctx->dxcall = dxcall;
+    }
+
     TxMsgType rcvd = parse_rcvd_msg(ctx, msg);
 
     ESP_LOGI(TAG, "generate_response: override=%d, rcvd=%d, ctx->state=%d",
@@ -625,23 +634,28 @@ static bool generate_response(QsoContext* ctx, const UiRxLine& msg, bool overrid
         ctx->snr_tx = msg.snr;
     }
 
-    // Get DX callsign from field2 (the sender), normalize to handle <> wrapped hashed calls
-    std::string dxcall = normalize_call_token(msg.field2);
-    if (dxcall.empty()) dxcall = normalize_call_token(msg.field1);
-
     if (override) {
         ctx->dxcall = dxcall;
         ctx->offset_hz = msg.offset_hz;
         ctx->slot_id = msg.slot_id ^ 1;  // TX on opposite slot
 
-    // Mark this QSO as Field Day only if the *received* message is CQ FD
-    // (This avoids sending FD exchange when answering a normal CQ while our CQType is FD.)
-    {
-        std::string f1 = msg.field1;
-        for (auto& ch : f1) ch = toupper((unsigned char)ch);
-        // Accept both "CQ FD" and "CQFD" (some decoders may omit the space)
-        ctx->is_fd = (f1 == "CQ FD" || f1 == "CQFD" || (f1.rfind("CQ FD", 0) == 0));
-    }
+        // Determine if this is a Field Day QSO
+        {
+            std::string f1 = msg.field1;
+            for (auto& ch : f1) ch = toupper((unsigned char)ch);
+            // Accept "CQ FD" in field1 (touch on CQ FD message)
+            if (f1 == "CQ FD" || f1 == "CQFD" || (f1.rfind("CQ FD", 0) == 0)) {
+                ctx->is_fd = true;
+            }
+            // Also mark as FD when we're in FD mode and received a valid FD exchange
+            // (handles DX replying to our CQ FD — field1 is our callsign, not "CQ FD")
+            else if (s_cq_type == AutoseqCqType::FD) {
+                std::string norm;
+                if (parse_fd_exchange(msg.field3, norm)) {
+                    ctx->is_fd = true;
+                }
+            }
+        }
 
         // Reset state based on received message type
         switch (rcvd) {

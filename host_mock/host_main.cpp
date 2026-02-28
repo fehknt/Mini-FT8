@@ -29,6 +29,12 @@ static void adif_callback(const std::string& dxcall, const std::string& dxgrid,
            dxcall.c_str(), dxgrid.c_str(), rst_sent, rst_rcvd);
 }
 
+// ---------- Cabrillo FD callback ----------
+static void cabrillo_fd_callback(const std::string& dxcall, const std::string& their_exchange) {
+    printf(">>> Cabrillo FD log: %s exchange=%s\n",
+           dxcall.c_str(), their_exchange.c_str());
+}
+
 // ---------- Helpers ----------
 
 static const char* beacon_mode_str(BeaconMode m) {
@@ -59,10 +65,26 @@ int main(int argc, char* argv[]) {
     autoseq_init();
     autoseq_set_station(td.config.my_callsign, td.config.my_grid);
     autoseq_set_adif_callback(adif_callback);
+    autoseq_set_cabrillo_fd_callback(cabrillo_fd_callback);
+
+    // Configure CQ type from test config
+    if (!td.config.cq_type.empty()) {
+        AutoseqCqType cq = AutoseqCqType::CQ;
+        if (td.config.cq_type == "FD")       cq = AutoseqCqType::FD;
+        else if (td.config.cq_type == "SOTA") cq = AutoseqCqType::SOTA;
+        else if (td.config.cq_type == "POTA") cq = AutoseqCqType::POTA;
+        else if (td.config.cq_type == "QRP")  cq = AutoseqCqType::QRP;
+        else if (td.config.cq_type == "FREETEXT") cq = AutoseqCqType::FREETEXT;
+        autoseq_set_cq_type(cq, td.config.free_text);
+    }
 
     printf("Station: %s / %s\n", td.config.my_callsign.c_str(),
            td.config.my_grid.c_str());
     printf("TX_ON_EVEN: %s\n", td.config.tx_on_even ? "true" : "false");
+    if (!td.config.cq_type.empty()) {
+        printf("CQ_TYPE: %s  FREE_TEXT: %s\n",
+               td.config.cq_type.c_str(), td.config.free_text.c_str());
+    }
     printf("Periods: %d\n\n", (int)td.periods.size());
 
     // Determine which parity we transmit on

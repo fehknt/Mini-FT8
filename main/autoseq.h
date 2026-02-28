@@ -120,6 +120,10 @@ int autoseq_queue_size();
 // Set the ADIF logging callback
 void autoseq_set_adif_callback(AdifLogCallback cb);
 
+// Cabrillo Field Day callback type (for ARRL-FD logging)
+using CabrilloFdLogCallback = void (*)(const std::string& dxcall, const std::string& their_fd_exchange);
+void autoseq_set_cabrillo_fd_callback(CabrilloFdLogCallback cb);
+
 // Configuration setters (called when station data changes)
 void autoseq_set_station(const std::string& call, const std::string& grid);
 void autoseq_set_skip_tx1(bool skip);  // Skip TX1 and start with TX2
