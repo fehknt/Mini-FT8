@@ -34,6 +34,7 @@ extern "C" {
 #include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <errno.h>
 #include <memory>
 #include "driver/usb_serial_jtag.h"
 #include "driver/uart.h"
@@ -343,17 +344,21 @@ static bool ends_with_adi(const char* name) {
 static bool is_log_file_on_spiffs(const char* name) {
   if (!name) return false;
   if (ends_with_adi(name)) return true;
-  return (strcmp(name, "RxTxLog.txt") == 0) || (strcmp(name, "StationData.ini") == 0);
+  return (strcmp(name, "RxTxLog.txt") == 0) ||
+         //(strcmp(name, "StationData.ini") == 0) ||
+         (strcmp(name, "fieldday.log") == 0);
 }
 
 static esp_err_t copy_file_overwrite(const char* src_path, const char* dst_path) {
   FILE* fs = fopen(src_path, "rb");
   if (!fs) return ESP_FAIL;
+
   FILE* fd = fopen(dst_path, "wb");  // overwrite
   if (!fd) { fclose(fs); return ESP_FAIL; }
 
   uint8_t buf[4096];
   size_t r = 0;
+
   while ((r = fread(buf, 1, sizeof(buf), fs)) > 0) {
     if (fwrite(buf, 1, r, fd) != r) {
       fclose(fd);
@@ -361,40 +366,60 @@ static esp_err_t copy_file_overwrite(const char* src_path, const char* dst_path)
       return ESP_FAIL;
     }
   }
+
+  // Detect read error (not just EOF)
+  if (ferror(fs)) {
+    fclose(fd);
+    fclose(fs);
+    return ESP_FAIL;
+  }
+
+  // Ensure SD gets the bytes
+  fflush(fd);
+  fsync(fileno(fd));
+
   fclose(fd);
   fclose(fs);
   return ESP_OK;
 }
-
 // Copy all log files from SPIFFS -> SD card, overwriting destination.
 // Copies: *.adi, RxTxLog.txt, StationData.ini
 static esp_err_t copy_logs_spiffs_to_sd_overwrite() {
   esp_err_t mret = ensure_sdcard_mounted();
   if (mret != ESP_OK) return mret;
+  vTaskDelay(pdMS_TO_TICKS(100));
+
+  // Always try to copy StationData.ini explicitly
+  (void)copy_file_overwrite("/spiffs/StationData.ini", "/sdcard/StationData.ini");
 
   DIR* d = opendir("/spiffs");
   if (!d) return ESP_FAIL;
 
+  esp_err_t last_err = ESP_OK;
   struct dirent* ent;
+
   while ((ent = readdir(d)) != nullptr) {
     const char* name = ent->d_name;
     if (!name || name[0] == '.') continue;
     if (!is_log_file_on_spiffs(name)) continue;
 
-    // Only regular files
     std::string src = std::string("/spiffs/") + name;
+
     struct stat st;
-    if (stat(src.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) continue;
+    bool ok = false;
+    for (int i = 0; i < 5; ++i) {
+      if (stat(src.c_str(), &st) == 0 && S_ISREG(st.st_mode)) { ok = true; break; }
+      vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    if (!ok) { last_err = ESP_FAIL; continue; }
 
     std::string dst = std::string("/sdcard/") + name;
     esp_err_t err = copy_file_overwrite(src.c_str(), dst.c_str());
-    if (err != ESP_OK) {
-      closedir(d);
-      return err;
-    }
+    if (err != ESP_OK) last_err = err;  // keep going
   }
+
   closedir(d);
-  return ESP_OK;
+  return last_err;
 }
 
 // Delete log files on SPIFFS (keep StationData.ini).
@@ -1698,7 +1723,8 @@ static void update_autoseq_cq_type() {
     case CqType::CQFREETEXT: t = AutoseqCqType::FREETEXT; break;
     default: t = AutoseqCqType::CQ; break;
   }
-  const std::string& ft = (g_cq_type == CqType::CQFREETEXT) ? g_free_text : g_cq_freetext;
+  const std::string& ft =
+    (g_cq_type == CqType::CQFREETEXT || g_cq_type == CqType::CQFD) ? g_free_text : g_cq_freetext;
   autoseq_set_cq_type(t, ft);
 }
 
