@@ -54,6 +54,9 @@ extern "C" {
 #include "sdmmc_cmd.h"
 #include "esp_vfs_fat.h"
 
+static const char* STATION_FILE_NEW = "/spiffs/Station.ini";
+static const char* STATION_FILE_OLD = "/spiffs/StationData.ini";
+
 #define ENABLE_BLE 0
 
 #if ENABLE_BLE
@@ -318,15 +321,15 @@ void mount_sd_spi(void)
 
 }
 
-void unmount_sd_spi(const char *mount_point)
-{
-    esp_vfs_fat_sdcard_unmount(mount_point, NULL);
-}
-
 // ---------- Log copy/delete helpers ----------
 static bool sdcard_is_mounted() {
   struct stat st;
   return (stat("/sdcard", &st) == 0) && S_ISDIR(st.st_mode);
+}
+
+static bool file_exists(const char* path) {
+  struct stat st;
+  return (stat(path, &st) == 0) && S_ISREG(st.st_mode);
 }
 
 static esp_err_t ensure_sdcard_mounted() {
@@ -334,19 +337,6 @@ static esp_err_t ensure_sdcard_mounted() {
   mount_sd_spi();
   if (sdcard_is_mounted()) return ESP_OK;
   return ESP_FAIL;
-}
-
-static bool ends_with_adi(const char* name) {
-  size_t n = strlen(name);
-  return (n >= 4) && (strcasecmp(name + (n - 4), ".adi") == 0);
-}
-
-static bool is_log_file_on_spiffs(const char* name) {
-  if (!name) return false;
-  if (ends_with_adi(name)) return true;
-  return (strcmp(name, "RxTxLog.txt") == 0) ||
-         //(strcmp(name, "StationData.ini") == 0) ||
-         (strcmp(name, "fieldday.log") == 0);
 }
 
 static esp_err_t copy_file_overwrite(const char* src_path, const char* dst_path) {
@@ -366,7 +356,6 @@ static esp_err_t copy_file_overwrite(const char* src_path, const char* dst_path)
       return ESP_FAIL;
     }
   }
-
   // Detect read error (not just EOF)
   if (ferror(fs)) {
     fclose(fd);
@@ -382,15 +371,66 @@ static esp_err_t copy_file_overwrite(const char* src_path, const char* dst_path)
   fclose(fs);
   return ESP_OK;
 }
+
+static void sync_station_ini_from_sd_if_present() {
+  // Mount SD (best effort)
+  if (ensure_sdcard_mounted() != ESP_OK) return;
+
+  const char* src = "/sdcard/Station.ini";
+  const char* dst = "/spiffs/Station.ini";
+
+  if (!file_exists(src)) return;
+
+  // Optional: tiny settle delay after mount
+  vTaskDelay(pdMS_TO_TICKS(50));
+
+  // Overwrite SPIFFS with SD copy
+  if (copy_file_overwrite(src, dst) == ESP_OK) {
+    ESP_LOGI("SD", "Loaded Station.ini from SD -> SPIFFS");
+  } else {
+    ESP_LOGW("SD", "Failed to copy Station.ini from SD");
+  }
+}
+
+
+static void migrate_station_file_if_needed() {
+  if (file_exists(STATION_FILE_NEW)) return;
+  if (!file_exists(STATION_FILE_OLD)) return;
+
+  // Best-effort rename; if it fails, you can fall back to copy+unlink
+  if (rename(STATION_FILE_OLD, STATION_FILE_NEW) != 0) {
+    // Fallback: copy then remove old
+    (void)copy_file_overwrite(STATION_FILE_OLD, STATION_FILE_NEW);
+    (void)unlink(STATION_FILE_OLD);
+  }
+}
+
+void unmount_sd_spi(const char *mount_point)
+{
+    esp_vfs_fat_sdcard_unmount(mount_point, NULL);
+}
+
+
+
+static bool ends_with_adi(const char* name) {
+  size_t n = strlen(name);
+  return (n >= 4) && (strcasecmp(name + (n - 4), ".adi") == 0);
+}
+
+static bool is_log_file_on_spiffs(const char* name) {
+  if (!name) return false;
+  if (ends_with_adi(name)) return true;
+  return (strcmp(name, "RxTxLog.txt") == 0) ||
+         (strcmp(name, "Station.ini") == 0) ||
+         (strcmp(name, "fieldday.log") == 0);
+}
+
 // Copy all log files from SPIFFS -> SD card, overwriting destination.
-// Copies: *.adi, RxTxLog.txt, StationData.ini
+// Copies: *.adi, RxTxLog.txt, Station.ini
 static esp_err_t copy_logs_spiffs_to_sd_overwrite() {
   esp_err_t mret = ensure_sdcard_mounted();
   if (mret != ESP_OK) return mret;
   vTaskDelay(pdMS_TO_TICKS(100));
-
-  // Always try to copy StationData.ini explicitly
-  (void)copy_file_overwrite("/spiffs/StationData.ini", "/sdcard/StationData.ini");
 
   DIR* d = opendir("/spiffs");
   if (!d) return ESP_FAIL;
@@ -422,7 +462,7 @@ static esp_err_t copy_logs_spiffs_to_sd_overwrite() {
   return last_err;
 }
 
-// Delete log files on SPIFFS (keep StationData.ini).
+// Delete log files on SPIFFS (keep Station.ini).
 // Deletes: *.adi and RxTxLog.txt
 static esp_err_t delete_logs_on_spiffs_keep_stationdata() {
   DIR* d = opendir("/spiffs");
@@ -616,7 +656,6 @@ static volatile int g_target_slot_parity = 0;   // 0=even, 1=odd - parity of slo
 static volatile bool g_was_txing = false;       // We were transmitting (for tick timing)
 volatile bool g_decode_in_progress = false; // Block TX trigger while decoding
 static int g_last_slot_parity = -1;             // For slot boundary detection (just parity, like reference)
-static const char* STATION_FILE = "/spiffs/StationData.ini";
 
 //enum class BeaconMode { OFF = 0, EVEN, EVEN2, ODD, ODD2 };
 enum class BeaconMode { OFF = 0, EVEN, ODD };
@@ -2910,8 +2949,17 @@ static void poll_ble_uart() {
 #endif // ENABLE_BLE
 
 static void load_station_data() {
-  FILE* f = fopen(STATION_FILE, "r");
-  if (!f) return;
+  migrate_station_file_if_needed();
+  // If SD has Station.ini, prefer it (overwrite SPIFFS)
+  sync_station_ini_from_sd_if_present();
+
+  FILE* f = fopen(STATION_FILE_NEW, "r");
+  if (!f) {
+    // Optional: legacy fallback without rename
+    f = fopen(STATION_FILE_OLD, "r");
+    if (!f) return;
+  }
+
   char line[64];
   while (fgets(line, sizeof(line), f)) {
     int idx = -1;
@@ -2976,11 +3024,15 @@ static void load_station_data() {
 }
 
 static void save_station_data() {
-  FILE* f = fopen(STATION_FILE, "w");
+  // ensure we migrate first so we don't keep writing the old filename
+  migrate_station_file_if_needed();
+
+  FILE* f = fopen(STATION_FILE_NEW, "w");
   if (!f) {
-    ESP_LOGE(TAG, "Failed to open %s for write", STATION_FILE);
+    ESP_LOGE(TAG, "Failed to open %s for write", STATION_FILE_NEW);
     return;
   }
+
   for (size_t i = 0; i < g_bands.size(); ++i) {
     fprintf(f, "band%u=%d\n", (unsigned)i, g_bands[i].freq);
   }
