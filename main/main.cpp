@@ -735,7 +735,7 @@ static std::vector<std::string> g_ctrl_lines = {
 };
 
 static std::vector<std::string> g_startup_lines = {
-    "Mini-FT8 V1.3.5",
+    "Mini-FT8 V1.4.0",
     "S: Status(Operate)",
     "R: Rx page",
     "T: Tx page",
