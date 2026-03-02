@@ -749,6 +749,7 @@ static std::string g_q_current_file;
 static std::string host_input;
 static const char* HOST_PROMPT = "MINIFT8> ";
 static bool usb_ready = false;
+static QueueHandle_t s_key_inject_queue = nullptr;
 static bool host_bin_active = false;
 static size_t host_bin_remaining = 0;
 static FILE* host_bin_fp = nullptr;
@@ -1197,6 +1198,50 @@ static void ensure_usb() {
   };
   if (usb_serial_jtag_driver_install(&cfg) == ESP_OK) {
     usb_ready = true;
+  }
+}
+
+static bool uart0_rx_ready = false;
+
+static void ensure_uart0_rx() {
+  if (uart0_rx_ready) return;
+  uart_config_t cfg = {};
+  cfg.baud_rate  = 115200;
+  cfg.data_bits  = UART_DATA_8_BITS;
+  cfg.parity     = UART_PARITY_DISABLE;
+  cfg.stop_bits  = UART_STOP_BITS_1;
+  cfg.flow_ctrl  = UART_HW_FLOWCTRL_DISABLE;
+  cfg.source_clk = UART_SCLK_DEFAULT;
+  if (uart_param_config(UART_NUM_0, &cfg) != ESP_OK) return;
+  if (uart_set_pin(UART_NUM_0, UART_PIN_NO_CHANGE, 2,
+                   UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE) != ESP_OK) return;
+  if (uart_driver_install(UART_NUM_0, 4096, 0, 0, NULL, 0) == ESP_OK) {
+    uart0_rx_ready = true;
+  }
+}
+
+static bool uart0_last_was_cr = false;
+
+static void poll_uart0_keys() {
+  if (!uart0_rx_ready || !s_key_inject_queue) return;
+  uint8_t buf[64];
+  while (true) {
+    int r = uart_read_bytes(UART_NUM_0, buf, sizeof(buf), 0);
+    if (r <= 0) break;
+    for (int i = 0; i < r; i++) {
+      char ch = (char)buf[i];
+      // CR/LF handling: \r -> Enter, \n after \r -> skip (avoid double Enter)
+      if (ch == '\r') {
+        char enter = '\n';
+        xQueueSend(s_key_inject_queue, &enter, 0);
+        uart0_last_was_cr = true;
+      } else if (ch == '\n' && uart0_last_was_cr) {
+        uart0_last_was_cr = false;  // skip LF after CR
+      } else {
+        uart0_last_was_cr = false;
+        xQueueSend(s_key_inject_queue, &ch, 0);
+      }
+    }
   }
 }
 
@@ -3213,6 +3258,10 @@ autoseq_set_cabrillo_fd_callback(log_cabrillo_fd_entry);
   }
   log_heap("BOOT");
 
+  // Key injection queue for UART0 RX testing
+  s_key_inject_queue = xQueueCreate(32, sizeof(char));
+  ensure_uart0_rx();
+
   // UI loop
   char last_key = 0;
   while (true) {
@@ -3227,6 +3276,15 @@ autoseq_set_cabrillo_fd_callback(log_cabrillo_fd_entry);
       c = 0x7f;  // treat delete/backspace
     } else if (state.enter) {
       c = '\n';  // enter/return
+    }
+    // Merge injected keys from UART0 RX
+    poll_uart0_keys();
+    if (c == 0 && s_key_inject_queue) {
+      char injected = 0;
+      if (xQueueReceive(s_key_inject_queue, &injected, 0) == pdTRUE) {
+        c = injected;
+        last_key = 0;  // Reset debounce so same-key injection works
+      }
     }
     // Startup screen overlay on RX page: show until any key press, and only once
     if (g_startup_active) {
