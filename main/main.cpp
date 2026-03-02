@@ -1555,17 +1555,22 @@ static bool rtc_init_from_hw() {
       actual_elapsed = raw_elapsed * 10000 / (10000 + g_rtc_comp);
     }
 
-    compensated_now = g_rtc_sleep_epoch + actual_elapsed;
+    // Fixed 1s boot delay: deep sleep entry → wake → gettimeofday
+    static constexpr int64_t BOOT_DELAY_SEC = 1;
+    compensated_now = g_rtc_sleep_epoch + actual_elapsed + BOOT_DELAY_SEC;
 
-    ESP_LOGI(TAG, "RTC wake: raw_elapsed=%lld, actual_elapsed=%lld, comp=%d",
-             (long long)raw_elapsed, (long long)actual_elapsed, g_rtc_comp);
+    ESP_LOGI(TAG, "RTC wake: raw_elapsed=%lld, actual_elapsed=%lld, comp=%d, boot_adj=%lld",
+             (long long)raw_elapsed, (long long)actual_elapsed, g_rtc_comp,
+             (long long)BOOT_DELAY_SEC);
 
     // Clear sleep epoch after use (one-time compensation)
     g_rtc_sleep_epoch = 0;
   }
 
   rtc_epoch_base = compensated_now;
-  rtc_ms_start = esp_timer_get_time() / 1000;
+  // Account for sub-second offset: tv.tv_usec tells us how far past the
+  // whole second we are, so rewind rtc_ms_start by that amount.
+  rtc_ms_start = esp_timer_get_time() / 1000 - tv.tv_usec / 1000;
   rtc_last_update = rtc_ms_start;
   rtc_valid = true;
 
@@ -2843,14 +2848,24 @@ static void host_handle_line(const std::string& line_in) {
     }
   } else if (cmd_up == "SLEEP") {
     if (rtc_valid) {
-      g_rtc_sleep_epoch = rtc_epoch_base +
-          (esp_timer_get_time() / 1000 - rtc_ms_start) / 1000;
-      rtc_sync_to_hw();
+      // Compute current time in milliseconds, round up to next second boundary
+      int64_t elapsed_ms = esp_timer_get_time() / 1000 - rtc_ms_start;
+      int64_t now_ms = (time_t)rtc_epoch_base * 1000LL + elapsed_ms;
+      int64_t frac = now_ms % 1000;
+      int64_t wait_ms = (frac > 0) ? (1000 - frac) : 0;
+      time_t sleep_epoch = (time_t)((now_ms + 999) / 1000);  // ceil to next second
+
+      g_rtc_sleep_epoch = sleep_epoch;
       save_station_data();
+
+      // Wait until the second boundary, then set HW RTC and sleep
+      if (wait_ms > 0) vTaskDelay(pdMS_TO_TICKS(wait_ms));
+      struct timeval tv = { .tv_sec = sleep_epoch, .tv_usec = 0 };
+      settimeofday(&tv, NULL);
     }
     send("OK: entering deep sleep");
     M5.Display.sleep();
-    vTaskDelay(pdMS_TO_TICKS(100));
+    vTaskDelay(pdMS_TO_TICKS(10));
     esp_sleep_enable_ext0_wakeup(GPIO_NUM_0, 0);
     esp_deep_sleep_start();
   } else if (cmd_up == "INFO") {
