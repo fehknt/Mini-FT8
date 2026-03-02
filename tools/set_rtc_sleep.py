@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Set Mini-FT8 RTC to current UTC time via USB serial terminal."""
+"""Set Mini-FT8 RTC to current UTC time, then enter deep sleep."""
 
 import sys
 import time
@@ -36,7 +36,7 @@ def send_cmd(ser, cmd):
 def main():
     port = sys.argv[1] if len(sys.argv) > 1 else find_port()
     if not port:
-        print("Usage: set_rtc.py [PORT]")
+        print("Usage: set_rtc_sleep.py [PORT]")
         print("No ESP32-S3 USB JTAG port detected.")
         sys.exit(1)
 
@@ -49,7 +49,7 @@ def main():
     time.sleep(0.1)
 
     # Set date first (no timing sensitivity)
-    r1 = send_cmd(ser, f"DATE {date_str}")
+    send_cmd(ser, f"DATE {date_str}")
 
     # Wait for the next second boundary, then send TIME for that second
     now = datetime.now(timezone.utc)
@@ -60,19 +60,18 @@ def main():
     # Date may have rolled over at midnight
     date_str2 = target.strftime("%Y-%m-%d")
     if date_str2 != date_str:
-        r1 = send_cmd(ser, f"DATE {date_str2}")
+        send_cmd(ser, f"DATE {date_str2}")
         date_str = date_str2
 
-    r2 = send_cmd(ser, f"TIME {time_str}")
-    ser.close()
+    send_cmd(ser, f"TIME {time_str}")
+    print(f"RTC set to {date_str} {time_str} UTC")
 
-    print(f"Setting RTC to {date_str} {time_str} UTC")
-    if r1 == "OK" and r2 == "OK":
-        print("OK")
-    else:
-        print(f"DATE: {r1}")
-        print(f"TIME: {r2}")
-        sys.exit(1)
+    # Send SLEEP and close immediately — device won't respond
+    ser.write(b"SLEEP\r\n")
+    ser.flush()
+    time.sleep(0.1)
+    ser.close()
+    print("SLEEP sent")
 
 
 if __name__ == "__main__":

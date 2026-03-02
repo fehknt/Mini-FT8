@@ -729,6 +729,7 @@ static std::vector<std::string> g_ctrl_lines = {
     "READ/DELETE",
     "DATE [YYYY-MM-DD]",
     "TIME [HH:MM:SS]",
+    "SLEEP - deep sleep",
     "LIST/INFO/HELP",
     "EXIT to leave"
 };
@@ -2840,6 +2841,18 @@ static void host_handle_line(const std::string& line_in) {
         else send("ERROR: invalid time");
       }
     }
+  } else if (cmd_up == "SLEEP") {
+    if (rtc_valid) {
+      g_rtc_sleep_epoch = rtc_epoch_base +
+          (esp_timer_get_time() / 1000 - rtc_ms_start) / 1000;
+      rtc_sync_to_hw();
+      save_station_data();
+    }
+    send("OK: entering deep sleep");
+    M5.Display.sleep();
+    vTaskDelay(pdMS_TO_TICKS(100));
+    esp_sleep_enable_ext0_wakeup(GPIO_NUM_0, 0);
+    esp_deep_sleep_start();
   } else if (cmd_up == "INFO") {
     send("Heap: " + std::to_string(heap_caps_get_free_size(MALLOC_CAP_DEFAULT)));
     send("OK");
