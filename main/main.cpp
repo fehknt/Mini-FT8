@@ -37,7 +37,7 @@ extern "C" {
 #include <errno.h>
 #include <memory>
 #include "driver/usb_serial_jtag.h"
-#include "driver/uart.h"
+#include "hal/uart_ll.h"
 #include "driver/gpio.h"
 #include "esp_system.h"
 #include "esp_random.h"
@@ -1205,34 +1205,20 @@ static void ensure_usb() {
   }
 }
 
-static bool uart0_rx_ready = false;
-
-static void ensure_uart0_rx() {
-  if (uart0_rx_ready) return;
-  uart_config_t cfg = {};
-  cfg.baud_rate  = 115200;
-  cfg.data_bits  = UART_DATA_8_BITS;
-  cfg.parity     = UART_PARITY_DISABLE;
-  cfg.stop_bits  = UART_STOP_BITS_1;
-  cfg.flow_ctrl  = UART_HW_FLOWCTRL_DISABLE;
-  cfg.source_clk = UART_SCLK_DEFAULT;
-  if (uart_param_config(UART_NUM_0, &cfg) != ESP_OK) return;
-  if (uart_set_pin(UART_NUM_0, UART_PIN_NO_CHANGE, 2,
-                   UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE) != ESP_OK) return;
-  if (uart_driver_install(UART_NUM_0, 4096, 0, 0, NULL, 0) == ESP_OK) {
-    uart0_rx_ready = true;
-  }
-}
-
 static bool uart0_last_was_cr = false;
 
 static void poll_uart0_keys() {
-  if (!uart0_rx_ready || !s_key_inject_queue) return;
-  uint8_t buf[64];
+  if (!s_key_inject_queue) return;
+  // Read directly from UART0 hardware FIFO — no driver needed.
+  // The console (sdkconfig) already has UART0 configured on TX=GPIO1, RX=GPIO2.
+  uart_dev_t *hw = UART_LL_GET_HW(0);
   while (true) {
-    int r = uart_read_bytes(UART_NUM_0, buf, sizeof(buf), 0);
-    if (r <= 0) break;
-    for (int i = 0; i < r; i++) {
+    uint32_t avail = uart_ll_get_rxfifo_len(hw);
+    if (avail == 0) break;
+    if (avail > 64) avail = 64;
+    uint8_t buf[64];
+    uart_ll_read_rxfifo(hw, buf, avail);
+    for (uint32_t i = 0; i < avail; i++) {
       char ch = (char)buf[i];
       // CR/LF handling: \r -> Enter, \n after \r -> skip (avoid double Enter)
       if (ch == '\r') {
@@ -3323,7 +3309,6 @@ autoseq_set_cabrillo_fd_callback(log_cabrillo_fd_entry);
 
   // Key injection queue for UART0 RX testing
   s_key_inject_queue = xQueueCreate(32, sizeof(char));
-  ensure_uart0_rx();
 
   // UI loop
   char last_key = 0;
