@@ -4,7 +4,7 @@
 ![First POTA Activation](IMG_6087.jpeg)
 
 ## Mini-FT8 Release Notice
-It currently supports QMX only.
+It supports QMX only. The current stable version is V1.3.3. (V1.4.0 that support ARRL Field Day will be release later after fully tested)
 
 ### Thanks
   - [DX FT8](https://github.com/WB2CBA/DX-FT8-FT8-MULTIBAND-TABLET-TRANSCEIVER) team: Barb (WB2CBA), Charley (W5BAA) and Paul (G8KIG) for inspirations.
