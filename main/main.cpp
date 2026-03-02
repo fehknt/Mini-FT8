@@ -690,6 +690,7 @@ static int debug_page = 0;
 static const size_t DEBUG_MAX_LINES = 18; // 3 pages
 
 static void host_handle_line(const std::string& line);
+static void save_station_data();
 // TX entry for display and scheduling (populated by autoseq)
 static AutoseqTxEntry g_pending_tx;
 static bool g_pending_tx_valid = false;
@@ -726,6 +727,8 @@ static std::vector<std::string> g_ctrl_lines = {
     "WRITEBIN <file> <size> <crc32_hex>",
     "WRITE/APPEND",
     "READ/DELETE",
+    "DATE [YYYY-MM-DD]",
+    "TIME [HH:MM:SS]",
     "LIST/INFO/HELP",
     "EXIT to leave"
 };
@@ -2803,6 +2806,38 @@ static void host_handle_line(const std::string& line_in) {
         memset(host_bin_last8, 0, sizeof(host_bin_last8));
         host_write_str("OK: send " + std::to_string(size) + " bytes, chunk " + std::to_string(HOST_BIN_CHUNK) + " +4crc\r\n");
         send_prompt = false; // prompt after binary upload completes
+      }
+    }
+  } else if (cmd_up == "DATE") {
+    if (rest.empty()) {
+      send("DATE " + g_date);
+    } else {
+      int y, M, d;
+      if (sscanf(rest.c_str(), "%d-%d-%d", &y, &M, &d) != 3 ||
+          y < 2024 || y > 2099 || M < 1 || M > 12 || d < 1 || d > 31) {
+        send("ERROR: use DATE YYYY-MM-DD");
+      } else {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%04d-%02d-%02d", y, M, d);
+        g_date = buf;
+        if (rtc_set_from_strings()) { rtc_sync_to_hw(); save_station_data(); send("OK"); }
+        else send("ERROR: invalid date");
+      }
+    }
+  } else if (cmd_up == "TIME") {
+    if (rest.empty()) {
+      send("TIME " + g_time);
+    } else {
+      int h, m, s;
+      if (sscanf(rest.c_str(), "%d:%d:%d", &h, &m, &s) != 3 ||
+          h < 0 || h > 23 || m < 0 || m > 59 || s < 0 || s > 59) {
+        send("ERROR: use TIME HH:MM:SS");
+      } else {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%02d:%02d:%02d", h, m, s);
+        g_time = buf;
+        if (rtc_set_from_strings()) { rtc_sync_to_hw(); save_station_data(); send("OK"); }
+        else send("ERROR: invalid time");
       }
     }
   } else if (cmd_up == "INFO") {
