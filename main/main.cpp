@@ -260,14 +260,13 @@ void mount_sd_spi(void)
     const char mount_point[] = "/sdcard";
 
     // 1) Init SPI bus
-    spi_bus_config_t bus_cfg = {
-        .mosi_io_num = PIN_NUM_MOSI,
-        .miso_io_num = PIN_NUM_MISO,
-        .sclk_io_num = PIN_NUM_CLK,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-        .max_transfer_sz = 4000,
-    };
+    spi_bus_config_t bus_cfg = {};
+    bus_cfg.mosi_io_num = PIN_NUM_MOSI;
+    bus_cfg.miso_io_num = PIN_NUM_MISO;
+    bus_cfg.sclk_io_num = PIN_NUM_CLK;
+    bus_cfg.quadwp_io_num = -1;
+    bus_cfg.quadhd_io_num = -1;
+    bus_cfg.max_transfer_sz = 4000;
 
     // Pick an SPI host; SPI2_HOST is commonly available on ESP32-S3.
     ret = spi_bus_initialize(SPI2_HOST, &bus_cfg, SPI_DMA_CH_AUTO);
@@ -288,11 +287,10 @@ void mount_sd_spi(void)
     slot_config.host_id = SPI2_HOST;
 
     // 3) Mount FAT filesystem
-    esp_vfs_fat_mount_config_t mount_config = {
-        .format_if_mount_failed = false,   // keep false until you're sure
-        .max_files = 5,
-        .allocation_unit_size = 16 * 1024
-    };
+    esp_vfs_fat_mount_config_t mount_config = {};
+    mount_config.format_if_mount_failed = false;
+    mount_config.max_files = 5;
+    mount_config.allocation_unit_size = 16 * 1024;
 
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
     // If you had flaky mounts, try slowing SPI down:
@@ -680,7 +678,7 @@ static int g_offset_hz = 1500;
 static int g_band_sel = 1; // default 80m
 static bool g_tune = false;
 static BeaconMode g_status_beacon_temp = BeaconMode::OFF;
-static bool g_cat_toggle_high = false;
+[[maybe_unused]] static bool g_cat_toggle_high = false;
 static std::string g_date = "2025-12-11";
 static std::string g_time = "10:10:00";
 static int status_edit_idx = -1;     // 0-5
@@ -837,8 +835,8 @@ static std::string g_last_reply_text;
 static void rebuild_active_bands();
 static void schedule_tx_if_idle();
 static int64_t s_last_tx_slot_idx = -1000;  // Track last TX slot for retry scheduling
-static bool g_sync_pending = false;
-static int g_sync_delta_ms = 0;
+[[maybe_unused]] static bool g_sync_pending = false;
+[[maybe_unused]] static int g_sync_delta_ms = 0;
 static void enqueue_beacon_cq();
 static void qso_load_file_list();
 static void qso_load_entries(const std::string& path);
@@ -1789,7 +1787,7 @@ static void fft_waterfall_tx_tone(uint8_t tone) {
   ui_push_waterfall_row(row.data(), (int)row.size());
 }
 
-static bool is_grid4(const std::string& s) {
+[[maybe_unused]] static bool is_grid4(const std::string& s) {
   if (s.size() != 4) return false;
   auto is_letter = [](char c){ return c >= 'A' && c <= 'R'; };
   auto is_digitc = [](char c){ return c >= '0' && c <= '9'; };
@@ -1799,7 +1797,7 @@ static bool is_grid4(const std::string& s) {
          is_digitc(s[3]);
 }
 
-static int parse_report_snr(const std::string& f3) {
+[[maybe_unused]] static int parse_report_snr(const std::string& f3) {
   if (f3.empty()) return -99;
   std::string s = f3;
   if (!s.empty() && (s[0] == 'R' || s[0] == 'r')) {
@@ -2218,13 +2216,13 @@ static void encode_and_log_pending_tx() {
   log_tones(tones, 79);
 }
 
-static bool looks_like_grid(const std::string& s) {
+[[maybe_unused]] static bool looks_like_grid(const std::string& s) {
   if (s.size() != 4) return false;
   return std::isalpha((unsigned char)s[0]) && std::isalpha((unsigned char)s[1]) &&
          std::isdigit((unsigned char)s[2]) && std::isdigit((unsigned char)s[3]);
 }
 
-static bool looks_like_report(const std::string& s, int& out) {
+[[maybe_unused]] static bool looks_like_report(const std::string& s, int& out) {
   if (s.empty()) return false;
   int sign = 1;
   size_t idx = 0;
@@ -2282,7 +2280,7 @@ static bool schedule_manual_pending_tx(const AutoseqTxEntry& pending) {
 // TX scheduling is done via g_qso_xmit and g_target_slot_parity flags,
 // and check_slot_boundary() triggers TX at the right time.
 // Keeping this as a no-op for now in case any code still calls it.
-static void schedule_tx_if_idle() {
+[[maybe_unused]] static void schedule_tx_if_idle() {
   // No-op: TX scheduling is now handled by decode_monitor_results setting
   // g_qso_xmit and check_slot_boundary triggering TX at slot start.
 }
@@ -2619,7 +2617,7 @@ static void ble_app_advertise(void)
 #else  // ENABLE_BLE
 static void host_send_bt(const std::string& s) { (void)s; }
 static void init_bluetooth(void) {}
-static void poll_ble_uart() {}
+[[maybe_unused]] static void poll_ble_uart() {}
 #endif // ENABLE_BLE
 
 static std::string trim_copy(const std::string& s) {
@@ -3974,7 +3972,7 @@ static void draw_status_line(int idx, const std::string& text, bool highlight) {
   M5.Display.setCursor(0, y);
   M5.Display.printf("%d %s", idx + 1, text.c_str());
 }
-static void draw_battery_icon(int x, int y, int w, int h, int level, bool charging) {
+[[maybe_unused]] static void draw_battery_icon(int x, int y, int w, int h, int level, bool charging) {
   if (level < 0) level = 0;
   if (level > 100) level = 100;
   // Outline

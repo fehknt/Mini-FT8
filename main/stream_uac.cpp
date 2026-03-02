@@ -290,13 +290,10 @@ static void uac_device_callback(uac_host_device_handle_t handle,
         return;
     }
 
-    uac_event_t evt = {
-        .type = UAC_EVT_DEVICE,
-        .device = {
-            .handle = handle,
-            .event = event
-        }
-    };
+    uac_event_t evt = {};
+    evt.type = UAC_EVT_DEVICE;
+    evt.device.handle = handle;
+    evt.device.event = event;
     xQueueSend(s_event_queue, &evt, 0);
 }
 
@@ -306,23 +303,19 @@ static void uac_driver_callback(uint8_t addr, uint8_t iface_num,
                                  void* arg) {
     ESP_LOGI(TAG, "UAC driver callback - addr:%d, iface:%d, event:%d", addr, iface_num, event);
 
-    uac_event_t evt = {
-        .type = UAC_EVT_DRIVER,
-        .driver = {
-            .addr = addr,
-            .iface_num = iface_num,
-            .event = event
-        }
-    };
+    uac_event_t evt = {};
+    evt.type = UAC_EVT_DRIVER;
+    evt.driver.addr = addr;
+    evt.driver.iface_num = iface_num;
+    evt.driver.event = event;
     xQueueSend(s_event_queue, &evt, 0);
 }
 
 // USB host library task
 static void usb_lib_task(void* arg) {
-    const usb_host_config_t host_config = {
-        .skip_phy_setup = false,
-        .intr_flags = ESP_INTR_FLAG_LEVEL1,
-    };
+    usb_host_config_t host_config = {};
+    host_config.skip_phy_setup = false;
+    host_config.intr_flags = ESP_INTR_FLAG_LEVEL1;
 
     esp_err_t err = usb_host_install(&host_config);
     if (err != ESP_OK) {
@@ -745,7 +738,8 @@ void uac_stop(void) {
 
     // Send stop event
     if (s_event_queue) {
-        uac_event_t evt = {.type = UAC_EVT_STOP};
+        uac_event_t evt = {};
+        evt.type = UAC_EVT_STOP;
         xQueueSend(s_event_queue, &evt, pdMS_TO_TICKS(100));
     }
 
