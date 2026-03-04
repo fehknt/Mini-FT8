@@ -54,8 +54,7 @@ extern "C" {
 #include "sdmmc_cmd.h"
 #include "esp_vfs_fat.h"
 
-static const char* STATION_FILE_NEW = "/spiffs/Station.ini";
-static const char* STATION_FILE_OLD = "/spiffs/StationData.ini";
+static const char* STATION_FILE = "/spiffs/Station.ini";
 
 #define ENABLE_BLE 0
 
@@ -390,18 +389,6 @@ static void sync_station_ini_from_sd_if_present() {
   }
 }
 
-
-static void migrate_station_file_if_needed() {
-  if (file_exists(STATION_FILE_NEW)) return;
-  if (!file_exists(STATION_FILE_OLD)) return;
-
-  // Best-effort rename; if it fails, you can fall back to copy+unlink
-  if (rename(STATION_FILE_OLD, STATION_FILE_NEW) != 0) {
-    // Fallback: copy then remove old
-    (void)copy_file_overwrite(STATION_FILE_OLD, STATION_FILE_NEW);
-    (void)unlink(STATION_FILE_OLD);
-  }
-}
 
 void unmount_sd_spi(const char *mount_point)
 {
@@ -3041,16 +3028,8 @@ static void poll_ble_uart() {
 #endif // ENABLE_BLE
 
 static void load_station_data() {
-  migrate_station_file_if_needed();
-  // If SD has Station.ini, prefer it (overwrite SPIFFS)
-  sync_station_ini_from_sd_if_present();
 
-  FILE* f = fopen(STATION_FILE_NEW, "r");
-  if (!f) {
-    // Optional: legacy fallback without rename
-    f = fopen(STATION_FILE_OLD, "r");
-    if (!f) return;
-  }
+  FILE* f = fopen(STATION_FILE, "r");
 
   char line[64];
   while (fgets(line, sizeof(line), f)) {
@@ -3116,12 +3095,10 @@ static void load_station_data() {
 }
 
 static void save_station_data() {
-  // ensure we migrate first so we don't keep writing the old filename
-  migrate_station_file_if_needed();
 
-  FILE* f = fopen(STATION_FILE_NEW, "w");
+  FILE* f = fopen(STATION_FILE, "w");
   if (!f) {
-    ESP_LOGE(TAG, "Failed to open %s for write", STATION_FILE_NEW);
+    ESP_LOGE(TAG, "Failed to open %s for write", STATION_FILE);
     return;
   }
 
