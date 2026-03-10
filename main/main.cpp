@@ -444,8 +444,8 @@ static esp_err_t delete_logs_on_spiffs_keep_stationdata() {
 
 static struct
 {
-    char callsign[12]; ///> Up to 11 symbols of callsign + trailing zeros (always filled)
-    uint32_t hash;     ///> 8 MSBs contain the age of callsign; 22 LSBs contain hash value
+    char callsign[12]; /// Up to 11 symbols of callsign + trailing zero
+    uint32_t hash;     /// 8 MSBs = age, 22 LSBs = hash value
 } callsign_hashtable[CALLSIGN_HASHTABLE_SIZE];
 
 static int callsign_hashtable_size;
@@ -459,19 +459,19 @@ void hashtable_init(void)
 // Increment age for all existing entries (saturate at 255). Call once per slot.
 static void hashtable_age_all(void)
 {
-    for (int idx_hash = 0; idx_hash < CALLSIGN_HASHTABLE_SIZE; ++idx_hash)
+    for (int i = 0; i < CALLSIGN_HASHTABLE_SIZE; ++i)
     {
-        if (callsign_hashtable[idx_hash].callsign[0] != '\0')
+        if (callsign_hashtable[i].callsign[0] != '\0')
         {
-            uint8_t age = (uint8_t)(callsign_hashtable[idx_hash].hash >> 24);
+            uint8_t age = (uint8_t)(callsign_hashtable[i].hash >> 24);
             if (age < 255)
             {
                 age++;
-                callsign_hashtable[idx_hash].hash = ((uint32_t)age << 24) | (callsign_hashtable[idx_hash].hash & 0x3FFFFFu);
+                callsign_hashtable[i].hash =
+                    ((uint32_t)age << 24) | (callsign_hashtable[i].hash & 0x003FFFFFu);
             }
         }
     }
-
 }
 
 // Trim the hash table if it grows too large by evicting the oldest entries
@@ -481,25 +481,26 @@ void hashtable_trim_size(int max_size)
     {
         int oldest_idx = -1;
         uint8_t oldest_age = 0;
-        for (int idx_hash = 0; idx_hash < CALLSIGN_HASHTABLE_SIZE; ++idx_hash)
+
+        for (int i = 0; i < CALLSIGN_HASHTABLE_SIZE; ++i)
         {
-            if (callsign_hashtable[idx_hash].callsign[0] == '\0')
-            {
+            if (callsign_hashtable[i].callsign[0] == '\0')
                 continue;
-            }
-            uint8_t age = (uint8_t)(callsign_hashtable[idx_hash].hash >> 24);
+
+            uint8_t age = (uint8_t)(callsign_hashtable[i].hash >> 24);
             if (oldest_idx < 0 || age > oldest_age)
             {
-                oldest_idx = idx_hash;
+                oldest_idx = i;
                 oldest_age = age;
             }
         }
+
         if (oldest_idx < 0)
-        {
             break;
-        }
-        LOG(LOG_INFO, "Hashtable trim: removing oldest [%s], age = %d\n",
-            callsign_hashtable[oldest_idx].callsign, oldest_age);
+
+        LOG(LOG_INFO, "Hashtable trim: removing oldest [%s], age=%u\n",
+            callsign_hashtable[oldest_idx].callsign, (unsigned)oldest_age);
+
         callsign_hashtable[oldest_idx].callsign[0] = '\0';
         callsign_hashtable[oldest_idx].hash = 0;
         callsign_hashtable_size--;
@@ -508,77 +509,104 @@ void hashtable_trim_size(int max_size)
 
 void hashtable_add(const char* callsign, uint32_t hash)
 {
-    uint32_t hash_payload = hash & 0x3FFFFFu; // lower 22 bits carry the hash value
-    uint16_t hash10 = (hash >> 12) & 0x3FFu;
-    int idx_hash = (hash10 * 23) % CALLSIGN_HASHTABLE_SIZE;
-    // Double-hash step: force odd so it's coprime with 256 and will visit every slot
-    int step = (int)((hash_payload % (CALLSIGN_HASHTABLE_SIZE / 2)) * 2 + 1);
+    if (!callsign || !callsign[0])
+        return;
+
+    uint32_t hash_payload = hash & 0x003FFFFFu;   // 22-bit value
+    uint16_t hash10 = (hash_payload >> 12) & 0x03FFu;
+    int idx = (hash10 * 23) % CALLSIGN_HASHTABLE_SIZE;
+    int start_idx = idx;
+
     while (callsign_hashtable_size >= CALLSIGN_HASHTABLE_SIZE)
     {
-        // Table is full; evict down to the target size to make room
-        hashtable_trim_size(CALLSIGN_HASHTABLE_SIZE-50);
+        hashtable_trim_size(CALLSIGN_HASHTABLE_SIZE - 50);
         if (callsign_hashtable_size >= CALLSIGN_HASHTABLE_SIZE)
         {
             LOG(LOG_INFO, "Hash table full; ignoring new callsign [%s]\n", callsign);
             return;
         }
     }
-    int start_idx = idx_hash;
-    while (callsign_hashtable[idx_hash].callsign[0] != '\0')
+
+    // Linear probing: must match lookup logic
+    while (callsign_hashtable[idx].callsign[0] != '\0')
     {
-        uint32_t existing_hash = callsign_hashtable[idx_hash].hash & 0x3FFFFFu;
-        if ((existing_hash == hash_payload) && (0 == strcmp(callsign_hashtable[idx_hash].callsign, callsign)))
+        uint32_t existing_hash = callsign_hashtable[idx].hash & 0x003FFFFFu;
+
+        if ((existing_hash == hash_payload) &&
+            (strcmp(callsign_hashtable[idx].callsign, callsign) == 0))
         {
-            // reset age
-            callsign_hashtable[idx_hash].hash = hash_payload;
-            LOG(LOG_DEBUG, "Found a duplicate [%s]\n", callsign);
+            // Refresh age to 0, keep same callsign/hash
+            callsign_hashtable[idx].hash = hash_payload;
+            LOG(LOG_DEBUG, "Found duplicate [%s], refreshed age\n", callsign);
             return;
         }
-        else if (existing_hash == hash_payload)
+
+        if (existing_hash == hash_payload)
         {
-            // Evict the previous callsign for this hash and replace with the new one
-            LOG(LOG_INFO, "Evicting [%s] for hash collision with [%s]\n",
-                callsign_hashtable[idx_hash].callsign, callsign);
-            callsign_hashtable[idx_hash].callsign[0] = '\0';
-            callsign_hashtable_size--;
-            break;
+            // Same 22-bit hash but different callsign: replace old one
+            LOG(LOG_INFO, "Replacing [%s] with [%s] on same hash\n",
+                callsign_hashtable[idx].callsign, callsign);
+
+            strncpy(callsign_hashtable[idx].callsign, callsign, 11);
+            callsign_hashtable[idx].callsign[11] = '\0';
+            callsign_hashtable[idx].hash = hash_payload;
+            return;
         }
-        else
+
+        idx = (idx + 1) % CALLSIGN_HASHTABLE_SIZE;
+        if (idx == start_idx)
         {
-            LOG(LOG_DEBUG, "Hash table clash!\n");
-            // Move on to check the next entry in hash table
-            idx_hash = (idx_hash + step) % CALLSIGN_HASHTABLE_SIZE;
-            if (idx_hash == start_idx)
-            {
-                LOG(LOG_INFO, "Hash table probe wrapped without finding a slot; aborting insert for [%s]\n", callsign);
-                return;
-            }
+            LOG(LOG_INFO, "Hash table probe wrapped; abort insert for [%s]\n", callsign);
+            return;
         }
     }
-    callsign_hashtable_size++;
-    strncpy(callsign_hashtable[idx_hash].callsign, callsign, 11);
-    callsign_hashtable[idx_hash].callsign[11] = '\0';
-    callsign_hashtable[idx_hash].hash = hash_payload;
 
+    strncpy(callsign_hashtable[idx].callsign, callsign, 11);
+    callsign_hashtable[idx].callsign[11] = '\0';
+    callsign_hashtable[idx].hash = hash_payload;  // age=0
+    callsign_hashtable_size++;
 }
 
 bool hashtable_lookup(ftx_callsign_hash_type_t hash_type, uint32_t hash, char* callsign)
 {
-    uint8_t hash_shift = (hash_type == FTX_CALLSIGN_HASH_10_BITS) ? 12 : (hash_type == FTX_CALLSIGN_HASH_12_BITS ? 10 : 0);
-    uint16_t hash10 = (hash >> (12 - hash_shift)) & 0x3FFu;
-    int idx_hash = (hash10 * 23) % CALLSIGN_HASHTABLE_SIZE;
-    while (callsign_hashtable[idx_hash].callsign[0] != '\0')
+    if (!callsign)
+        return false;
+
+    uint8_t hash_shift =
+        (hash_type == FTX_CALLSIGN_HASH_10_BITS) ? 12 :
+        (hash_type == FTX_CALLSIGN_HASH_12_BITS) ? 10 : 0;
+
+    // Derive the same start bucket from the top 10 bits of the 22-bit hash.
+    // For 10-bit lookup: hash is already the top 10 bits.
+    // For 12-bit lookup: top 10 bits are hash >> 2.
+    // For 22-bit lookup: top 10 bits are hash >> 12.
+    uint16_t hash10 =
+        (hash_type == FTX_CALLSIGN_HASH_10_BITS) ? (hash & 0x03FFu) :
+        (hash_type == FTX_CALLSIGN_HASH_12_BITS) ? ((hash >> 2) & 0x03FFu) :
+                                                   ((hash >> 12) & 0x03FFu);
+
+    int idx = (hash10 * 23) % CALLSIGN_HASHTABLE_SIZE;
+    int start_idx = idx;
+
+    // Linear probing: must match add()
+    while (callsign_hashtable[idx].callsign[0] != '\0')
     {
-        if (((callsign_hashtable[idx_hash].hash & 0x3FFFFFu) >> hash_shift) == hash)
+        uint32_t existing_hash = callsign_hashtable[idx].hash & 0x003FFFFFu;
+
+        if ((existing_hash >> hash_shift) == hash)
         {
-            strcpy(callsign, callsign_hashtable[idx_hash].callsign);
-            // Reset age on successful lookup (touched this slot)
-            callsign_hashtable[idx_hash].hash &= 0x00FFFFFFu;
+            strcpy(callsign, callsign_hashtable[idx].callsign);
+
+            // Reset age to 0 on successful hit, preserve 22-bit payload
+            callsign_hashtable[idx].hash = existing_hash;
             return true;
         }
-        // Move on to check the next entry in hash table
-        idx_hash = (idx_hash + 1) % CALLSIGN_HASHTABLE_SIZE;
+
+        idx = (idx + 1) % CALLSIGN_HASHTABLE_SIZE;
+        if (idx == start_idx)
+            break;
     }
+
     callsign[0] = '\0';
     return false;
 }
