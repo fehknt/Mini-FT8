@@ -110,6 +110,18 @@ bool load_test_data(const std::string& filename, TestData& out) {
         out.periods.push_back(std::move(period));
     }
 
+    // --- expected_adif (optional) ---
+    if (j.contains("expected_adif")) {
+        for (auto& aj : j["expected_adif"]) {
+            ExpectedAdif ea;
+            ea.dxcall  = aj.value("dxcall", "");
+            substitute(ea.dxcall, out.config);
+            ea.rst_sent = aj.value("rst_sent", -999);
+            ea.rst_rcvd = aj.value("rst_rcvd", -999);
+            out.expected_adif.push_back(ea);
+        }
+    }
+
     std::cout << "Loaded " << out.periods.size() << " periods, station "
               << out.config.my_callsign << "/" << out.config.my_grid << "\n";
     return true;

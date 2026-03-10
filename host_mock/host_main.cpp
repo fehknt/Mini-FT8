@@ -23,10 +23,19 @@ enum class BeaconMode { OFF = 0, EVEN, ODD };
 static BeaconMode g_beacon = BeaconMode::OFF;
 
 // ---------- ADIF callback ----------
+struct AdifRecord {
+    std::string dxcall;
+    std::string dxgrid;
+    int rst_sent;
+    int rst_rcvd;
+};
+static std::vector<AdifRecord> g_adif_records;
+
 static void adif_callback(const std::string& dxcall, const std::string& dxgrid,
                            int rst_sent, int rst_rcvd) {
     printf(">>> ADIF log: %s %s rst_sent=%+d rst_rcvd=%+d\n",
            dxcall.c_str(), dxgrid.c_str(), rst_sent, rst_rcvd);
+    g_adif_records.push_back({dxcall, dxgrid, rst_sent, rst_rcvd});
 }
 
 // ---------- Cabrillo FD callback ----------
@@ -202,6 +211,41 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    printf("\n========== Test complete ==========\n");
-    return 0;
+    // ---------- ADIF assertions ----------
+    int fail_count = 0;
+    if (!td.expected_adif.empty()) {
+        printf("\n---------- ADIF assertions ----------\n");
+        for (size_t i = 0; i < td.expected_adif.size(); ++i) {
+            const auto& exp = td.expected_adif[i];
+            // Find matching ADIF record
+            const AdifRecord* found = nullptr;
+            for (const auto& rec : g_adif_records) {
+                if (rec.dxcall == exp.dxcall) { found = &rec; break; }
+            }
+            if (!found) {
+                printf("FAIL: expected ADIF for %s, but none logged\n",
+                       exp.dxcall.c_str());
+                ++fail_count;
+                continue;
+            }
+            if (exp.rst_sent != -999 && found->rst_sent != exp.rst_sent) {
+                printf("FAIL: %s rst_sent: expected %+d, got %+d\n",
+                       exp.dxcall.c_str(), exp.rst_sent, found->rst_sent);
+                ++fail_count;
+            }
+            if (exp.rst_rcvd != -999 && found->rst_rcvd != exp.rst_rcvd) {
+                printf("FAIL: %s rst_rcvd: expected %+d, got %+d\n",
+                       exp.dxcall.c_str(), exp.rst_rcvd, found->rst_rcvd);
+                ++fail_count;
+            }
+            if (fail_count == 0) {
+                printf("PASS: %s rst_sent=%+d rst_rcvd=%+d\n",
+                       exp.dxcall.c_str(), found->rst_sent, found->rst_rcvd);
+            }
+        }
+    }
+
+    printf("\n========== Test %s ==========\n",
+           fail_count ? "FAILED" : "complete");
+    return fail_count ? 1 : 0;
 }
