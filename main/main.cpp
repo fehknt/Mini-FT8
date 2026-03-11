@@ -1116,6 +1116,15 @@ static void qso_load_entries(const std::string& path) {
 }
 
 static void log_adif_entry(const std::string& dxcall, const std::string& dxgrid, int rst_sent, int rst_rcvd) {
+  // Protect ADIF file access with the same mutex used for RxTxLog.
+  // log_qso_if_needed can be called from the UAC streaming task (core 1)
+  // via generate_response, so concurrent writes must be serialized.
+  if (!log_mutex) return;
+  if (xSemaphoreTake(log_mutex, pdMS_TO_TICKS(200)) != pdTRUE) {
+    ESP_LOGW(TAG, "ADIF mutex timeout");
+    return;
+  }
+
   // Build file name based on current date
   time_t now = (time_t)(rtc_now_ms() / 1000);
   struct tm t;
@@ -1135,6 +1144,7 @@ static void log_adif_entry(const std::string& dxcall, const std::string& dxgrid,
   FILE* f = fopen(path, "a");
   if (!f) {
     ESP_LOGW(TAG, "ADIF open failed");
+    xSemaphoreGive(log_mutex);
     return;
   }
   if (need_header) {
@@ -1179,6 +1189,7 @@ static void log_adif_entry(const std::string& dxcall, const std::string& dxgrid,
           rst_rcvd == -99 ? 1 : (int)snprintf(nullptr,0,"%d",rst_rcvd), rst_rcvd,
           comment_expanded.size(), comment_expanded.c_str());
   fclose(f);
+  xSemaphoreGive(log_mutex);
 }
 
 

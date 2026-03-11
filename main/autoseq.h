@@ -105,7 +105,7 @@ bool autoseq_get_next_tx(std::string& out_text);
 bool autoseq_fetch_pending_tx(AutoseqTxEntry& out);
 
 // Mark TX as sent (called after transmission completes)
-// Note: ADIF logging happens in format_tx_text() when generating TX4/TX5
+// Note: ADIF logging happens in generate_response() state transitions
 void autoseq_mark_sent(int64_t slot_idx);
 
 // Get display strings for active QSOs

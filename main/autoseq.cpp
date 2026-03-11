@@ -339,7 +339,7 @@ void autoseq_mark_sent(int64_t slot_idx) {
     s_last_tx_slot_idx = slot_idx;
     s_last_tx_parity = s_queue[0].slot_id & 1;
 
-    // Logging now happens in format_tx_text() when generating TX4/TX5
+    // Logging happens in generate_response() when state transitions to ROGERS/SIGNOFF
     ESP_LOGI(TAG, "TX sent on slot %lld", slot_idx);
 }
 
@@ -459,16 +459,15 @@ static void format_tx_text(QsoContext* ctx, TxMsgType id, std::string& out) {
             snprintf(buf, sizeof(buf), "%s %s RR73",
                      ctx->dxcall.c_str(), s_my_call.c_str());
             out = buf;
-            // Log QSO when generating RR73 (matches reference project)
-            log_qso_if_needed(ctx);
+            // Logging moved to generate_response() state transitions to avoid
+            // dual-core race: format_tx_text is called from both core 0 (UI)
+            // and core 1 (decode), causing concurrent ADIF writes.
             break;
 
         case TxMsgType::TX5:
             snprintf(buf, sizeof(buf), "%s %s 73",
                      ctx->dxcall.c_str(), s_my_call.c_str());
             out = buf;
-            // Log QSO when generating 73 (matches reference project)
-            log_qso_if_needed(ctx);
             break;
 
         case TxMsgType::TX6: {
@@ -691,6 +690,7 @@ static bool generate_response(QsoContext* ctx, const UiRxLine& msg, bool overrid
                     return true;
                 case TxMsgType::TX3:
                     set_state(ctx, AutoseqState::ROGERS, TxMsgType::TX4, AUTOSEQ_MAX_RETRY);
+                    log_qso_if_needed(ctx);
                     return true;
                 default:
                     return false;
@@ -703,11 +703,12 @@ static bool generate_response(QsoContext* ctx, const UiRxLine& msg, bool overrid
                     return true;
                 case TxMsgType::TX3:
                     set_state(ctx, AutoseqState::ROGERS, TxMsgType::TX4, AUTOSEQ_MAX_RETRY);
+                    log_qso_if_needed(ctx);
                     return true;
                 case TxMsgType::TX4:
                 case TxMsgType::TX5:
-                    // QSO complete without full exchange - logging happens in format_tx_text
                     set_state(ctx, AutoseqState::SIGNOFF, TxMsgType::TX5, 0);
+                    log_qso_if_needed(ctx);
                     return true;
                 default:
                     return false;
@@ -723,11 +724,12 @@ static bool generate_response(QsoContext* ctx, const UiRxLine& msg, bool overrid
                     return true;
                 case TxMsgType::TX3:
                     set_state(ctx, AutoseqState::ROGERS, TxMsgType::TX4, AUTOSEQ_MAX_RETRY);
+                    log_qso_if_needed(ctx);
                     return true;
                 case TxMsgType::TX4:
                 case TxMsgType::TX5:
-                    // Logging happens in format_tx_text when we generate TX5
                     set_state(ctx, AutoseqState::SIGNOFF, TxMsgType::TX5, 0);
+                    log_qso_if_needed(ctx);
                     return true;
                 default:
                     return false;
@@ -737,8 +739,8 @@ static bool generate_response(QsoContext* ctx, const UiRxLine& msg, bool overrid
             switch (rcvd) {
                 case TxMsgType::TX4:
                 case TxMsgType::TX5:
-                    // Logging happens in format_tx_text when we generate TX5
                     set_state(ctx, AutoseqState::SIGNOFF, TxMsgType::TX5, AUTOSEQ_MAX_RETRY);
+                    log_qso_if_needed(ctx);
                     return true;
                 default:
                     return false;
@@ -748,7 +750,7 @@ static bool generate_response(QsoContext* ctx, const UiRxLine& msg, bool overrid
             switch (rcvd) {
                 case TxMsgType::TX4:
                 case TxMsgType::TX5:
-                    // Already logged when we generated TX4 - just mark complete
+                    // Already logged at ROGERS entry - just mark complete
                     set_state(ctx, AutoseqState::IDLE, TxMsgType::TX_UNDEF, 0);
                     break;
                 default:
@@ -760,11 +762,10 @@ static bool generate_response(QsoContext* ctx, const UiRxLine& msg, bool overrid
             switch (rcvd) {
                 case TxMsgType::TX4:
                 case TxMsgType::TX5:
-                    // They didn't get our 73; send another (already logged when we sent TX5)
+                    // Already logged at SIGNOFF entry; send another 73
                     set_state(ctx, AutoseqState::SIGNOFF, TxMsgType::TX5, AUTOSEQ_MAX_RETRY);
                     return true;
                 default:
-                    // Ignore other traffic; keep context for a bit
                     return false;
             }
             return false;
