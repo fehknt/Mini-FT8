@@ -1178,15 +1178,26 @@ static void log_adif_entry(const std::string& dxcall, const std::string& dxgrid,
   };
   repl(comment_expanded, "/Radio", radio_name_local(g_radio));
   repl(comment_expanded, "/Ant", g_ant);
-  fprintf(f, "<call:%zu>%s <gridsquare:%zu>%s <mode:3>FT8<qso_date:8>%s <time_on:6>%s <freq:%zu>%s <station_callsign:%zu>%s <my_gridsquare:%zu>%s <rst_sent:%d>%d <rst_rcvd:%d>%d <comment:%zu>%s <eor>\n",
+  // Build rst_sent/rst_rcvd fragments — omit when -99 (no data),
+  // matching DXFT8 reference behavior (ADIF.c omits when value is 0).
+  char rst_sent_buf[32] = "";
+  char rst_rcvd_buf[32] = "";
+  if (rst_sent != -99) {
+    snprintf(rst_sent_buf, sizeof(rst_sent_buf), "<rst_sent:%d>%d ",
+             (int)snprintf(nullptr, 0, "%d", rst_sent), rst_sent);
+  }
+  if (rst_rcvd != -99) {
+    snprintf(rst_rcvd_buf, sizeof(rst_rcvd_buf), "<rst_rcvd:%d>%d ",
+             (int)snprintf(nullptr, 0, "%d", rst_rcvd), rst_rcvd);
+  }
+  fprintf(f, "<call:%zu>%s <gridsquare:%zu>%s <mode:3>FT8<qso_date:8>%s <time_on:6>%s <freq:%zu>%s <station_callsign:%zu>%s <my_gridsquare:%zu>%s %s%s<comment:%zu>%s <eor>\n",
           dxcall.size(), dxcall.c_str(),
           dxgrid.size(), dxgrid.c_str(),
           date, time_on,
           strlen(freq_str), freq_str,
           g_call.size(), g_call.c_str(),
           g_grid.size(), g_grid.c_str(),
-          rst_sent == -99 ? 1 : (int)snprintf(nullptr,0,"%d",rst_sent), rst_sent,
-          rst_rcvd == -99 ? 1 : (int)snprintf(nullptr,0,"%d",rst_rcvd), rst_rcvd,
+          rst_sent_buf, rst_rcvd_buf,
           comment_expanded.size(), comment_expanded.c_str());
   fclose(f);
   xSemaphoreGive(log_mutex);
