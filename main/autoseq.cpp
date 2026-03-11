@@ -562,10 +562,6 @@ static TxMsgType parse_rcvd_msg(QsoContext* ctx, const UiRxLine& msg) {
             if (!t.empty() && (t[0] == 'R' || t[0] == 'r')) rcvd = TxMsgType::TX3;
             else rcvd = TxMsgType::TX2;
 
-            // FD exchanges replace the numeric report, so use the decoded
-            // signal SNR as the best available substitute for RST.
-            ctx->snr_rx = msg.snr;
-
             ctx->rcvd_msg_type = rcvd;
             return rcvd;
         }

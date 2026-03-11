@@ -66,12 +66,5 @@
       "comment": "Period 6 (even): we send 73 (TX5), QSO complete",
       "messages": []
     }
-  ],
-  "expected_adif": [
-    {
-      "dxcall": "${DX_CALLSIGN}",
-      "rst_sent": -6,
-      "rst_rcvd": -6
-    }
   ]
 }

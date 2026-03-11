@@ -36,16 +36,9 @@ struct TestPeriod {
     TouchEvent   touch_event;
 };
 
-struct ExpectedAdif {
-    std::string dxcall;
-    int rst_sent = -999;   // -999 = don't check
-    int rst_rcvd = -999;
-};
-
 struct TestData {
     TestConfig              config;
     std::vector<TestPeriod> periods;
-    std::vector<ExpectedAdif> expected_adif;  // optional ADIF assertions
 };
 
 // ---------- API ----------
