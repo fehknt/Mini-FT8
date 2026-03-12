@@ -14,7 +14,7 @@ Mini-FT8 is built on Karlis Goba’s ft8_lib. It’s also a joint adventure betw
 
 ### Hardware
 (I have no affiliation with the vendor.)
-  - Must order: https://shop.m5stack.com/products/m5stack-cardputer-adv-version-esp32-s3
+  - Must order: https://shop.m5stack.com/products/m5stack-cardputer-adv-version-esp32-s3 or from digikey: https://www.digikey.com/en/products/detail/m5stack-technology-co-ltd/K132-ADV/27685158
   - Optional:https://shop.m5stack.com/products/4pin-buckled-grove-cable
 (for a homebrew serial cable, or for charging when operating long time since USB-C is occupied by QMX)
 
