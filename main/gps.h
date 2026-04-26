@@ -11,7 +11,8 @@ struct gps_state_t {
     double latitude = 0.0;
     double longitude = 0.0;
     std::string grid_square; // "CM97"
-    uint32_t last_rx_ms = 0; // last received decodable NMEA sentence
+    uint32_t last_rx_ms = 0;            // last received decodable NMEA sentence
+    uint32_t last_rx_ms_first_byte = 0; // timestamp of '$' for this sentence
     int active_baud = 0;
     bool baud_locked = false;
     bool running = false;

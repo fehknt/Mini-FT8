@@ -118,7 +118,7 @@ static int64_t g_ble_last_tick_slot = -1;
 static int g_ble_last_tick_sec = -1;
 static std::string g_ble_waterfall_header = "|                           |";
 static int64_t g_ble_waterfall_slot_idx = -1;
-static bool g_ble_text_mode = false;
+#define UAC_STREAM_TASK_PRIORITY 6
 static volatile uint32_t g_ble_decode_event_seq = 0;
 static volatile int g_ble_decode_event_count = 0;
 static uint32_t g_ble_decode_event_seq_seen = 0;
@@ -1037,7 +1037,7 @@ static void ble_start_qso_pick_mode();
 static void ble_cancel_qso_pick_mode();
 static void ble_try_dump_qso_file_by_key(char key);
 #endif
-
+static bool rtc_set_from_strings(int ms_offset = 0);
 
 
 static std::vector<std::string> g_ctrl_lines = {
@@ -1170,6 +1170,8 @@ static int g_gps_baud = 115200;
 static constexpr size_t kIgnorePrefixTextMaxLen = 64;
 static std::string g_comment1 = "MiniFT8 /Radio";
 static std::string g_ignore_prefix_text;
+static int64_t g_gps_cal_start_rtc_ms = 0;
+static time_t g_gps_cal_start_gps_sec = 0;
 static std::vector<std::string> g_ignore_prefixes;
 static bool g_rxtx_log = true;
 static RadioType canonical_radio_type(RadioType r);
@@ -2107,7 +2109,7 @@ static void gps_runtime_tick() {
       save_station_data();
       ESP_LOGI(TAG, "GPS baud persisted: %d", g_gps_baud);
     }
-  }
+  static int64_t s_pending_rtc_drift_ms = 0;
 
   const int64_t now = rtc_now_ms();
   if ((now - s_last_apply_ms) < 1000) return;
@@ -2171,13 +2173,29 @@ static void gps_runtime_tick() {
       } else {
         g_date = old_date;
         g_time = old_time;
-      }
-    }
-  }
+        int64_t rtc_expected = (int64_t)gps_epoch * 1000;
+        int64_t drift_ms = rtc_at_boundary - rtc_expected;
+        // 1. Queue Proactive Sync: Store drift to be applied at the next slot transition
+        if (abs((int)drift_ms) > 100) {
+          s_pending_rtc_drift_ms = drift_ms;
+        }
 
-  if (changed) {
-    save_station_data();
-  }
+        // Apply pending drift only during slot transition (first 500ms) when idle
+        if (s_pending_rtc_drift_ms != 0 && !g_tx_active && !g_decode_in_progress) {
+          int64_t slot_ms = g_protocol->slot_time_ms;
+          int64_t slot_pos = rtc_now % slot_ms;
+          if (slot_pos < 500) {
+            rtc_ms_start += s_pending_rtc_drift_ms;
+            ESP_LOGI(TAG, "GPS Transition Sync: nudged %lldms (at slot pos %lld)", s_pending_rtc_drift_ms, slot_pos);
+            s_pending_rtc_drift_ms = 0;
+            g_time_synced_from_gps = true;
+            s_time_synced_once = true;
+            changed = true;
+          }
+        }
+
+        // 2. Background Calibration: Measure drift over long period
+        if (g_gps_cal_start_gps_sec == 0) {
 }
 
 static std::string expand_comment_macros(const std::string& src) {
@@ -2185,7 +2203,59 @@ static std::string expand_comment_macros(const std::string& src) {
   auto repl = [](std::string& s, const std::string& from, const std::string& to) {
     size_t pos = 0;
     while ((pos = s.find(from, pos)) != std::string::npos) {
-      s.replace(pos, from.size(), to);
+          int64_t elapsed_gps_sec = gps_epoch - g_gps_cal_start_gps_sec;
+          // After at least 10 minutes of stable fix, calculate drift rate (ppm)
+          if (elapsed_gps_sec >= 600) {
+            int64_t elapsed_rtc_ms = rtc_at_boundary - g_gps_cal_start_rtc_ms;
+            int64_t expected_rtc_ms = elapsed_gps_sec * 1000;
+            int64_t total_drift_ms = elapsed_rtc_ms - expected_rtc_ms;
+            
+            // ppm = (drift / expected) * 1,000,000
+            // rtc_comp = parts per 10,000. So rtc_comp = (drift_ms * 10) / elapsed_gps_sec
+            int new_comp = (int)((total_drift_ms * 10) / elapsed_gps_sec);
+            
+            // Limit the change per update to avoid oscillation
+            if (abs(new_comp - g_rtc_comp) > 0) {
+              int old_comp = g_rtc_comp;
+              // Simple EMA-like update (weighted 25% new value)
+              g_rtc_comp = (old_comp * 3 + new_comp) / 4;
+              ESP_LOGI(TAG, "GPS Calibration: old_comp=%d, new_comp=%d, refined=%d (drift %lldms over %llds)", 
+                       old_comp, new_comp, g_rtc_comp, total_drift_ms, elapsed_gps_sec);
+              
+              // Reset baseline for next window
+              g_gps_cal_start_gps_sec = gps_epoch;
+              g_gps_cal_start_rtc_ms = rtc_at_boundary;
+              changed = true;
+            }
+          }
+        }
+      }
+    }
+
+    bool do_time_sync = !s_time_synced_once;
+
+    if (do_time_sync) {
+      const std::string old_date = g_date;
+      const std::string old_time = g_time;
+      g_date = st.date_utc;
+      g_time = st.time_utc;
+      // Calculate how long ago the GPS burst started.
+      // This compensates for UART transmission and processing time.
+      uint32_t ms_ago = (uint32_t)(rtc_now_ms() - st.last_rx_ms_first_byte);
+      if (ms_ago > 2000) ms_ago = 0; // Safety clamp
+      if (rtc_set_from_strings((int)ms_ago)) {
+        rtc_sync_to_hw();
+        s_time_synced_once = true;
+        g_time_synced_from_gps = true;
+        changed = true;
+        ESP_LOGI(TAG, "GPS time synced: %s %s (adj %ums)", g_date.c_str(), g_time.c_str(), (unsigned)ms_ago);
+        radio_control_set_time(h, m, s);
+      } else {
+        g_date = old_date;
+        g_time = old_time;
+      }
+    }
+  }
       pos += to.size();
     }
   };
@@ -2391,15 +2461,17 @@ static bool rtc_set_from_strings() {
   rtc_epoch_base = epoch;
   rtc_ms_start = esp_timer_get_time() / 1000;
   rtc_last_update = rtc_ms_start;
-  rtc_valid = true;
+static bool rtc_set_from_strings(int ms_offset = 0) {
   return true;
 }
 
 // Initialize soft RTC from hardware RTC (persists through deep sleep)
 // Applies compensation if we have valid sleep epoch data
 static bool rtc_init_from_hw() {
-  struct timeval tv;
-  if (gettimeofday(&tv, NULL) != 0) return false;
+  // If ms_offset is positive (e.g. 200ms), it means the string we just parsed
+  // was for the second boundary that occurred 200ms ago.
+  rtc_ms_start = (esp_timer_get_time() / 1000) - ms_offset;
+++ b/main/stream_uac.cpp
 
   // Check if hardware RTC has valid time (year > 2020)
   struct tm t;

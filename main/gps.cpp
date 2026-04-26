@@ -26,6 +26,7 @@ const char* kTag = "GPS";
 
 gps_state_t s_state = {};
 std::string s_line_buffer;
+uint32_t s_line_start_ms = 0;
 uint32_t s_probe_start_ms = 0;
 uint32_t s_probe_rx_bytes = 0;
 bool s_probe_decodable = false;
@@ -199,6 +200,7 @@ bool parse_sentence(const std::string& raw_line) {
   }
 
   s_state.last_rx_ms = now_ms();
+  s_state.last_rx_ms_first_byte = s_line_start_ms;
   s_probe_decodable = true;
   (void)recognized;
   lock_current_baud_if_needed();
@@ -218,6 +220,7 @@ void ingest_uart_bytes(const uint8_t* data, int len) {
       continue;
     }
     if ((unsigned char)c < 32 || (unsigned char)c > 126) continue;
+    if (c == '$') s_line_start_ms = now_ms();
     s_line_buffer.push_back(c);
     if (s_line_buffer.size() > kGpsLineMax) s_line_buffer.clear();
   }

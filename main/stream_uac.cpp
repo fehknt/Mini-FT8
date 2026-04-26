@@ -45,7 +45,7 @@ int64_t rtc_now_ms();
 // Task priorities and stack sizes
 #define USB_HOST_TASK_PRIORITY  5
 #define UAC_TASK_PRIORITY       5
-#define UAC_STREAM_TASK_PRIORITY 4
+#define UAC_STREAM_TASK_PRIORITY 6
 #define TASK_STACK_SIZE         4096
 #define STREAM_TASK_STACK_SIZE  8192
 
