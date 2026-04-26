@@ -1,5 +1,6 @@
 #include "stream_uac.h"
 #include "resample.h"
+#include "protocol.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -567,8 +568,8 @@ static void stream_uac_task(void* arg) {
     // Wait until the next 15s boundary
     {
         int64_t now_ms = rtc_now_ms();
-        int64_t rem = now_ms % 15000;
-        int64_t wait_ms = (rem < 100) ? 0 : (15000 - rem);
+        int64_t rem = now_ms % g_protocol->slot_time_ms;
+        int64_t wait_ms = (rem < 100) ? 0 : (g_protocol->slot_time_ms - rem);
         if (wait_ms > 0) {
             vTaskDelay(pdMS_TO_TICKS((uint32_t)wait_ms));
         }
@@ -581,7 +582,7 @@ static void stream_uac_task(void* arg) {
         .sample_rate = FT8_SAMPLE_RATE,
         .time_osr = g_time_osr,
         .freq_osr = g_freq_osr,
-        .protocol = FTX_PROTOCOL_FT8
+        .protocol = g_protocol->protocol_id
     };
 
     monitor_t mon;
@@ -606,12 +607,12 @@ static void stream_uac_task(void* arg) {
         return;
     }
 
-    const int target_blocks = 80;
+    const int target_blocks = g_protocol->total_symbols + 1;
     int ft8_buffer_idx = 0;  // Current position in ft8_buffer
     TickType_t next_wake = xTaskGetTickCount();
     int slot_blocks = 0;
-    int64_t slot_idx = rtc_now_ms() / 15000;
-    int64_t slot_start_ms = slot_idx * 15000;
+    int64_t slot_idx = rtc_now_ms() / g_protocol->slot_time_ms;
+    int64_t slot_start_ms = slot_idx * g_protocol->slot_time_ms;
     (void)slot_start_ms; // silence unused warning
 
     while (!s_stop_requested && s_mic_handle != NULL) {
@@ -697,12 +698,12 @@ static void stream_uac_task(void* arg) {
 
                 ft8_buffer_idx = 0;
 
-                // Maintain 160ms timing
-                vTaskDelayUntil(&next_wake, pdMS_TO_TICKS(160));
+                // Maintain symbol timing
+                vTaskDelayUntil(&next_wake, pdMS_TO_TICKS((uint32_t)(g_protocol->symbol_period * 1000.0f)));
 
-                // Align decode to 15s boundaries based on RTC
+                // Align decode to slot boundaries based on RTC
                 slot_blocks++;
-                int64_t now_idx = rtc_now_ms() / 15000;
+                int64_t now_idx = rtc_now_ms() / g_protocol->slot_time_ms;
                 if (now_idx != slot_idx) {
                     ESP_LOGI(TAG, "Slot boundary %lld->%lld blocks=%d wf=%d",
                              (long long)slot_idx, (long long)now_idx,
@@ -715,12 +716,12 @@ static void stream_uac_task(void* arg) {
                     }
                     // Reset counters at the boundary
                     slot_idx = now_idx;
-                    slot_start_ms = slot_idx * 15000;
+                    slot_start_ms = slot_idx * g_protocol->slot_time_ms;
                     slot_blocks = 0;
                     mon.wf.num_blocks = 0;
                     monitor_reset(&mon);
                     next_wake = xTaskGetTickCount();
-                } else if (slot_blocks >= 79 && mon.wf.num_blocks >= 79) {
+                } else if (slot_blocks >= g_protocol->total_symbols && mon.wf.num_blocks >= g_protocol->total_symbols) {
                     ESP_LOGI(TAG, "Triggering decode at slot %lld blocks=%d wf=%d",
                              (long long)slot_idx, slot_blocks, mon.wf.num_blocks);
                     if (g_decode_enabled) {

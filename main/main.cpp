@@ -1,4 +1,4 @@
-#define DEBUG_LOG 1
+﻿#define DEBUG_LOG 1
 
 #include <cstdio>
 #include <cmath>
@@ -58,6 +58,7 @@ extern "C" {
 #include "driver/sdspi_host.h"
 #include "sdmmc_cmd.h"
 #include "esp_vfs_fat.h"
+#include "protocol.h"
 
 static const char* STATION_FILE = "/spiffs/Station.txt";
 static sdmmc_card_t* g_sd_card = NULL;
@@ -953,7 +954,7 @@ volatile int64_t g_decode_applied_slot_idx = -1;
 
 // Set by stream_uac_task after a successful CDC-ACM open (QMX CAT USB-CDC
 // enumeration). Consumed exactly once by the main loop to auto-sync VFO /
-// mode to the radio — covers the "first connect" case so users don't have
+// mode to the radio ΓÇö covers the "first connect" case so users don't have
 // to press S->2 manually. QMX only enumerates once per power cycle and
 // mini-ft8 restarts on QMX disconnect, so this flag effectively fires at
 // most once per mini-ft8 lifetime. For KH1 (UART CAT, persistent), the
@@ -968,17 +969,28 @@ static volatile bool g_was_txing = false;       // We were transmitting (for tic
 volatile bool g_decode_in_progress = false; // Block TX trigger while decoding
 static int g_last_slot_parity = -1;             // For slot boundary detection (just parity, like reference)
 
+const ProtocolConfig* g_protocol = &kProtocolFT8;
+
 //enum class BeaconMode { OFF = 0, EVEN, EVEN2, ODD, ODD2 };
 enum class BeaconMode { OFF = 0, EVEN, ODD };
 struct BandItem {
   const char* name;
-  int freq;
+  float freq;
 };
-static std::vector<BandItem> g_bands = {
+static std::vector<BandItem> g_ft8_bands = {
     {"160m", 1840},   {"80m", 3573},   {"60m", 5357},   {"40m", 7074},
     {"30m", 10136},   {"20m", 14074},  {"17m", 18100},  {"15m", 21074},
     {"12m", 24915},   {"10m", 28074},  {"6m", 50313},   {"2m", 144174},
 };
+static std::vector<BandItem> g_ft4_bands = {
+    {"160m", 1840.0f},  {"80m", 3575.0f},  {"60m", 5357.0f},  {"40m", 7047.5f},
+    {"30m", 10140.0f},  {"20m", 14080.0f}, {"17m", 18104.0f}, {"15m", 21140.0f},
+    {"12m", 24919.0f},  {"10m", 28180.0f}, {"6m", 50318.0f},  {"2m", 144170.0f},
+};
+static std::vector<BandItem>& get_bands() {
+    return (g_protocol == &kProtocolFT4) ? g_ft4_bands : g_ft8_bands;
+}
+#define g_bands (get_bands())
 static std::string g_active_band_text = "80 40 20 17 15 12 10";
 static std::vector<int> g_active_band_indices;
 static int band_page = 0;
@@ -1187,7 +1199,7 @@ static bool g_tx_active = false;           // TX state machine is running
 static int g_tx_tone_idx = 0;              // Current tone index (0-78)
 static int64_t g_tx_next_tone_time = 0;    // When to send next tone (ms)
 static int64_t g_tx_slot_start_ms = 0;     // Slot boundary time for tone alignment
-static uint8_t g_tx_tones[79];             // Encoded tones
+static uint8_t g_tx_tones[128];            // Encoded tones (FT8=79, FT4=105)
 static int g_tx_base_hz = 0;               // Base frequency for TA commands
 static int64_t g_tx_slot_idx = 0;          // Slot index for autoseq_mark_sent
 static bool g_tx_cat_ok = false;           // CAT available for this TX
@@ -1386,8 +1398,8 @@ static void log_cabrillo_fd_entry(const std::string& dxcall, const std::string& 
   char time_hhmm[8];
   snprintf(time_hhmm, sizeof(time_hhmm), "%02d%02d", t.tm_hour % 100, t.tm_min % 100);
 
-  // Frequency: use selected band dial frequency (kHz)
-  int freq_khz = (int)g_bands[g_band_sel].freq;
+  // Frequency: dial frequency (Hz)
+  int freq_hz = (int)(g_bands[g_band_sel].freq * 1000.0f);
 
   const char* path = "/spiffs/fieldday.txt";
 
@@ -1396,7 +1408,7 @@ static void log_cabrillo_fd_entry(const std::string& dxcall, const std::string& 
 
   char qso_line[128];
   snprintf(qso_line, sizeof(qso_line), "QSO: %d DG %s %s %s %s %s %s",
-           freq_khz,
+           freq_hz / 1000,
            date_ymd,
            time_hhmm,
            g_call.c_str(),
@@ -1709,7 +1721,7 @@ static void log_adif_entry(const std::string& dxcall, const std::string& dxgrid,
 
   std::string comment_expanded = expand_comment_macros(g_comment1);
   const std::string my_grid4 = grid_ft8_4(g_grid);
-  // Build rst_sent/rst_rcvd fragments — omit when -99 (no data),
+  // Build rst_sent/rst_rcvd fragments ΓÇö omit when -99 (no data),
   // matching DXFT8 reference behavior (ADIF.c omits when value is 0).
   char rst_sent_buf[32] = "";
   char rst_rcvd_buf[32] = "";
@@ -1750,11 +1762,11 @@ static bool uart_inject_last_was_cr = false;
 
 static void poll_uart_inject_keys() {
   if (!s_key_inject_queue) return;
-  // Read directly from the console UART FIFO — no driver needed.
+  // Read directly from the console UART FIFO ΓÇö no driver needed.
   // sdkconfig configures ESP console on UART0 peripheral with custom
   // pins TX=GPIO13, RX=GPIO15 (see CONFIG_ESP_CONSOLE_UART_CUSTOM_NUM_0
   // and CONFIG_ESP_CONSOLE_UART_TX_GPIO / _RX_GPIO). KH1 CAT uses
-  // UART1 peripheral on GPIO1 — no conflict.
+  // UART1 peripheral on GPIO1 ΓÇö no conflict.
   uart_dev_t *hw = UART_LL_GET_HW(0);
   while (true) {
     uint32_t avail = uart_ll_get_rxfifo_len(hw);
@@ -2145,9 +2157,32 @@ static void gps_runtime_tick() {
     int h = 0, m = 0, s = 0;
     const bool parsed_date = (sscanf(st.date_utc.c_str(), "%d-%d-%d", &y, &M, &d) == 3);
     const bool parsed_time = (sscanf(st.time_utc.c_str(), "%d:%d:%d", &h, &m, &s) == 3);
-    int hour_key = -1;
     if (parsed_date && parsed_time) {
-      hour_key = (((y * 100) + M) * 100 + d) * 100 + h;
+      
+      // Background Auto-Calibration & Proactive Sync
+      struct tm t_now = {};
+      t_now.tm_year = y - 1900; t_now.tm_mon = M - 1; t_now.tm_mday = d;
+      t_now.tm_hour = h; t_now.tm_min = m; t_now.tm_sec = s;
+      time_t gps_epoch = mktime(&t_now);
+      
+      if (gps_epoch != (time_t)-1) {
+        int64_t rtc_now = rtc_now_ms();
+        // Adjust rtc_now by the NMEA latency we measured earlier
+        uint32_t ms_ago = (uint32_t)(rtc_now - st.last_rx_ms_first_byte);
+        if (ms_ago > 2000) ms_ago = 0;
+        int64_t rtc_at_boundary = rtc_now - ms_ago;
+        int64_t rtc_expected = (int64_t)gps_epoch * 1000;
+        int64_t drift_ms = rtc_at_boundary - rtc_expected;
+
+        // 1. Proactive Sync: If error > 20ms, nudge the clock immediately
+        if (abs((int)drift_ms) > 20 && !g_tx_active && !g_decode_in_progress) {
+          rtc_ms_start += drift_ms; 
+          g_time_synced_from_gps = true;
+          s_time_synced_once = true;
+          changed = true;
+          ESP_LOGI(TAG, "GPS Proactive Sync: nudged %lldms", drift_ms);
+        }
+      }
     }
 
     bool do_time_sync = !s_time_synced_once;
@@ -2162,7 +2197,6 @@ static void gps_runtime_tick() {
       const std::string old_time = g_time;
       g_date = st.date_utc;
       g_time = st.time_utc;
-      if (rtc_set_from_strings()) {
         rtc_sync_to_hw();
         s_time_synced_once = true;
         g_time_synced_from_gps = true;
@@ -2490,7 +2524,7 @@ static bool rtc_init_from_hw() {
       actual_elapsed = raw_elapsed * 10000 / (10000 + g_rtc_comp);
     }
 
-    // Fixed 1s boot delay: deep sleep entry → wake → gettimeofday
+    // Fixed 1s boot delay: deep sleep entry ΓåÆ wake ΓåÆ gettimeofday
     static constexpr int64_t BOOT_DELAY_SEC = 1;
     compensated_now = g_rtc_sleep_epoch + actual_elapsed + BOOT_DELAY_SEC;
 
@@ -2607,7 +2641,7 @@ static bool sync_radio_to_current_band(const char* reason) {
 // STATUS->2 button (put radio in RX + push current band to VFO), so users
 // don't have to press anything after plugging in QMX. Called from the main
 // loop every iteration (before early-exit branches). Fires at most once
-// per CDC open — cleared on successful sync, retries on later iterations
+// per CDC open ΓÇö cleared on successful sync, retries on later iterations
 // until CAT becomes ready and we're not TXing. For KH1 (UART CAT, no USB
 // enumeration event), this flag is never set; the STATUS-exit auto-sync
 // and S->3 handler cover KH1.
@@ -2615,18 +2649,22 @@ static void consume_cdc_initial_sync() {
   if (!g_cdc_initial_sync_pending) return;
   if (sync_radio_to_current_band("initial QMX connect")) {
     g_cdc_initial_sync_pending = false;
+    time_t now = (time_t)(rtc_now_ms() / 1000);
+    struct tm ti;
+    gmtime_r(&now, &ti);
+    radio_control_set_time(ti.tm_hour, ti.tm_min, ti.tm_sec);
   }
 }
 
 static void update_countdown() {
   int64_t now_ms = rtc_now_ms();
-  int64_t slot_idx = now_ms / 15000;
-  int64_t slot_ms = now_ms % 15000;
+  int64_t slot_idx = now_ms / g_protocol->slot_time_ms;
+  int64_t slot_ms = now_ms % g_protocol->slot_time_ms;
   static int64_t last_slot_idx = -1;
   static int last_sec = -1;
   int sec = (int)(slot_ms / 1000);
   if (slot_idx != last_slot_idx || sec != last_sec) {
-    float frac = (float)slot_ms / 15000.0f;
+    float frac = (float)slot_ms / (float)g_protocol->slot_time_ms;
     bool even = (slot_idx % 2) == 0;
     ui_draw_countdown(frac, even, g_offset_hz);
     last_slot_idx = slot_idx;
@@ -2636,9 +2674,9 @@ static void update_countdown() {
 
 static void redraw_countdown_now() {
   int64_t now_ms = rtc_now_ms();
-  int64_t slot_idx = now_ms / 15000;
-  int64_t slot_ms = now_ms % 15000;
-  float frac = (float)slot_ms / 15000.0f;
+  int64_t slot_idx = now_ms / g_protocol->slot_time_ms;
+  int64_t slot_ms = now_ms % g_protocol->slot_time_ms;
+  float frac = (float)slot_ms / (float)g_protocol->slot_time_ms;
   bool even = (slot_idx % 2) == 0;
   ui_draw_countdown(frac, even, g_offset_hz);
 }
@@ -2651,8 +2689,8 @@ static void tx_tick();
 // Matches reference project: tick after TX slot ends, TX trigger at slot start
 static void check_slot_boundary() {
   int64_t now_ms = rtc_now_ms();
-  int64_t slot_idx = now_ms / 15000;
-  int slot_ms = (int)(now_ms % 15000);
+  int64_t slot_idx = now_ms / g_protocol->slot_time_ms;
+  int slot_ms = (int)(now_ms % g_protocol->slot_time_ms);
   int slot_parity = (int)(slot_idx & 1);
 
   // Detect slot boundary (parity change)
@@ -2675,12 +2713,11 @@ static void check_slot_boundary() {
   // and decode must be complete (TX is always triggered by decode results).
   // Additional guard (g_decode_applied_slot_idx): enforces that decode for the
   // previous RX slot (slot_idx - 1) has been fully applied to autoseq state before
-  // we fire TX. Without this, a slot boundary that arrives before audio capture
-  // has completed (audio is 12.64s, slot is 15s — tight window) could fire TX
-  // based on a prior cycle's state. See AUTOSEQ_INACTIVE_QUEUE.md.
+  // we fire TX.
+  int trigger_window_ms = (g_protocol->protocol_id == FTX_PROTOCOL_FT4) ? 2000 : 4000;
   if (g_qso_xmit &&
       g_target_slot_parity == slot_parity &&
-      slot_ms < 4000 &&
+      slot_ms < trigger_window_ms &&
       !g_tx_active &&
       !g_decode_in_progress &&
       g_decode_applied_slot_idx >= slot_idx - 1) {
@@ -2689,17 +2726,15 @@ static void check_slot_boundary() {
              (long long)slot_idx, slot_parity);
 
     // Calculate skip_tones for partial slot
-    int skip_tones = slot_ms / 160;
-    if (skip_tones < 79) {
+    int symbol_period_ms = (int)(g_protocol->symbol_period * 1000);
+    int skip_tones = slot_ms / symbol_period_ms;
+    if (skip_tones < g_protocol->total_symbols) {
       // Only proceed if we have a valid pending TX
-      // NOTE: Don't clear g_qso_xmit until we're sure g_pending_tx is valid.
-      // This avoids a race condition where decode_monitor_results is still
-      // writing g_pending_tx on core 1 while we read it on core 0.
       if (g_pending_tx_valid && !g_pending_tx.text.empty()) {
         g_qso_xmit = false;  // Clear flag only AFTER validation succeeds
-        g_was_txing = true;  // Set IMMEDIATELY when TX starts (prevents decode_monitor_results from re-setting flags)
+        g_was_txing = true;  // Set IMMEDIATELY when TX starts
 
-        // Compute actual TX offset now (before logging) based on offset_src setting
+        // Compute actual TX offset
         int actual_offset;
         if (g_offset_src == OffsetSrc::CURSOR) {
           actual_offset = g_offset_hz;
@@ -2708,10 +2743,10 @@ static void check_slot_boundary() {
                    g_pending_tx.text.rfind("CQ ", 0) != 0) {
           actual_offset = g_pending_tx.offset_hz;
         } else {
-          // RANDOM mode or CQ in RX mode: generate random offset
+          // RANDOM mode or CQ in RX mode
           actual_offset = 500 + (int)(esp_random() % 2001);
         }
-        g_pending_tx.offset_hz = actual_offset;  // Store for tx_start to use
+        g_pending_tx.offset_hz = actual_offset;
         log_rxtx_line('T', 0, actual_offset, g_pending_tx.text, g_pending_tx.repeat_counter);
         tx_start(skip_tones);
       }
@@ -2822,9 +2857,11 @@ static void advance_active_band(int delta) {
 }
 
 static void fft_waterfall_tx_tone(uint8_t tone) {
-  // Map tone 0-7 to screen width and push a bright bin
+  // Map tone to screen width and push a bright bin
+  // FT8 has 8 tones (0-7), FT4 has 4 tones (0-3)
+  int total_tones = (g_protocol->protocol_id == FTX_PROTOCOL_FT4) ? 4 : 8;
   std::array<uint8_t, 240> row{};
-  int pos = (int)((tone * row.size()) / 8);
+  int pos = (int)((tone * row.size()) / total_tones);
   if (pos < 0) pos = 0;
   if (pos >= (int)row.size()) pos = (int)row.size() - 1;
   row[pos] = 200;
@@ -2982,7 +3019,7 @@ void decode_monitor_results(monitor_t* mon, const monitor_config_t* cfg, bool up
   ESP_LOGI(TAG, "Candidates found: %d", num_candidates);
 
   // ---- slot index + once-per-slot hashtable maintenance ----
-  int64_t slot_idx = (g_decode_slot_idx >= 0) ? g_decode_slot_idx : rtc_now_ms() / 15000LL;
+  int64_t slot_idx = (g_decode_slot_idx >= 0) ? g_decode_slot_idx : rtc_now_ms() / g_protocol->slot_time_ms;
   int slot_id = (int)(slot_idx & 1);
 
   static int64_t s_last_aged_slot = -1;
@@ -3031,7 +3068,7 @@ void decode_monitor_results(monitor_t* mon, const monitor_config_t* cfg, bool up
     if (update_ui) { ui_draw_rx(); }
     else g_rx_dirty = true;
     ble_publish_decode_event(0);
-    // No candidates means we processed the slot's audio but found nothing —
+    // No candidates means we processed the slot's audio but found nothing ΓÇö
     // still counts as "applied" for the TX-trigger guard.
     if (g_decode_slot_idx > g_decode_applied_slot_idx) {
       g_decode_applied_slot_idx = g_decode_slot_idx;
@@ -3100,7 +3137,7 @@ void decode_monitor_results(monitor_t* mon, const monitor_config_t* cfg, bool up
     if (snr_q < -30) snr_q = -30;
     if (snr_q >  99) snr_q = 99;
 
-    // DXpedition rewrite (uses heap briefly via std::string — bounded, rare path)
+    // DXpedition rewrite (uses heap briefly via std::string ΓÇö bounded, rare path)
     char final_text[DEC_TEXT_MAX];
     {
       std::string raw(text);
@@ -3112,7 +3149,7 @@ void decode_monitor_results(monitor_t* mon, const monitor_config_t* cfg, bool up
       final_text[DEC_TEXT_MAX - 1] = '\0';
     }
 
-    // UI text dedup (linear scan — 32 entries max, no hash map needed)
+    // UI text dedup (linear scan ΓÇö 32 entries max, no hash map needed)
     int dup_idx = -1;
     for (int j = 0; j < s_dec_count; ++j) {
       if (strcmp(s_dec[j].text, final_text) == 0) { dup_idx = j; break; }
@@ -3229,7 +3266,7 @@ void decode_monitor_results(monitor_t* mon, const monitor_config_t* cfg, bool up
     }
   }
 
-  // ---- Zero-heap handoff: static s_dec[] → ui.cpp's static rx_lines[] ----
+  // ---- Zero-heap handoff: static s_dec[] ΓåÆ ui.cpp's static rx_lines[] ----
   ui_set_rx_list_static(s_dec, s_dec_count);
 
   if (update_ui) {
@@ -3308,10 +3345,13 @@ static void encode_and_log_pending_tx() {
     debug_log_line("Encode failed");
     return;
   }
-  uint8_t tones[79] = {0};
-  ft8_encode(msg.payload, tones);
+  if (g_protocol->protocol_id == FTX_PROTOCOL_FT4) {
+    ft4_encode(msg.payload, g_tx_tones);
+  } else {
+    ft8_encode(msg.payload, g_tx_tones);
+  }
   debug_log_line(std::string("Tones for '") + g_pending_tx.text + "'");
-  log_tones(tones, 79);
+  log_tones(g_tx_tones, g_protocol->total_symbols);
 }
 
 [[maybe_unused]] static bool looks_like_grid(const std::string& s) {
@@ -3345,7 +3385,7 @@ static void enqueue_beacon_cq() {
   g_tx_view_dirty = true;
 }
 
-static bool autoseq_has_pending_tx() {
+[[maybe_unused]] static bool autoseq_has_pending_tx() {
   AutoseqTxEntry tmp;
   return autoseq_fetch_pending_tx(tmp);
 }
@@ -3353,7 +3393,7 @@ static bool autoseq_has_pending_tx() {
 // Schedule a one-off pending TX (e.g., manual FreeText) without touching autoseq state.
 // Returns false if TX is already active or if scheduling failed.
 // Uses the single-threaded state machine - TX will trigger at next matching slot boundary.
-static bool schedule_manual_pending_tx(const AutoseqTxEntry& pending) {
+[[maybe_unused]] static bool schedule_manual_pending_tx(const AutoseqTxEntry& pending) {
   // Already transmitting or TX pending?
   if (g_tx_active || g_qso_xmit) {
     return false;
@@ -3412,13 +3452,13 @@ static void tx_start(int skip_tones) {
 
   // Get current slot info
   int64_t now_ms = rtc_now_ms();
-  g_tx_slot_idx = now_ms / 15000;
+  g_tx_slot_idx = now_ms / g_protocol->slot_time_ms;
 
   ESP_LOGI(TAG, "tx_start: TX=%s offset=%d skip=%d slot=%lld",
            g_pending_tx.text.c_str(), g_pending_tx.offset_hz, skip_tones, (long long)g_tx_slot_idx);
 
   // Notify autoseq that TX emission is starting. This is the single canonical
-  // logging trigger — if we're about to emit TX4 (RR73) or TX5 (73), autoseq
+  // logging trigger ΓÇö if we're about to emit TX4 (RR73) or TX5 (73), autoseq
   // writes the ADIF entry now.
   autoseq_on_tx_starting();
 
@@ -3429,18 +3469,22 @@ static void tx_start(int skip_tones) {
     ESP_LOGE(TAG, "Encode failed for TX");
     return;
   }
-  ft8_encode(msg.payload, g_tx_tones);
+  if (g_protocol->protocol_id == FTX_PROTOCOL_FT4) {
+    ft4_encode(msg.payload, g_tx_tones);
+  } else {
+    ft8_encode(msg.payload, g_tx_tones);
+  }
 
   // Set up TX state machine
   // IMPORTANT: Tone timing must be based on slot boundary, not TX start time.
   // This ensures TX ends at the correct time even if TX started late,
   // allowing RX to start cleanly at the next slot boundary.
   g_tx_base_hz = g_pending_tx.offset_hz;
-  g_tx_slot_start_ms = (now_ms / 15000) * 15000;  // Slot boundary time
-  g_tx_tone_idx = (skip_tones >= 79) ? 79 : skip_tones;
-  // Next tone time = slot_start + tone_idx * 160ms
-  // This aligns all tones to the slot boundary, not to when TX started
-  g_tx_next_tone_time = g_tx_slot_start_ms + g_tx_tone_idx * 160;
+  g_tx_slot_start_ms = (now_ms / g_protocol->slot_time_ms) * g_protocol->slot_time_ms;  // Slot boundary time
+  g_tx_tone_idx = (skip_tones >= g_protocol->total_symbols) ? g_protocol->total_symbols : skip_tones;
+  // Next tone time = slot_start + tone_idx * symbol_period_ms
+  int symbol_period_ms = (int)(g_protocol->symbol_period * 1000);
+  g_tx_next_tone_time = g_tx_slot_start_ms + g_tx_tone_idx * symbol_period_ms;
   g_tx_last_ta_int = -1;
   g_tx_last_ta_frac = -1;
 
@@ -3462,8 +3506,8 @@ static void tx_start(int skip_tones) {
   }
 
   // Send first tone TA if CAT is ready
-  if (g_tx_cat_ok && g_tx_tone_idx < 79) {
-    float tone_hz = g_tx_base_hz + 6.25f * g_tx_tones[g_tx_tone_idx];
+  if (g_tx_cat_ok && g_tx_tone_idx < g_protocol->total_symbols) {
+    float tone_hz = g_tx_base_hz + g_protocol->tone_spacing * g_tx_tones[g_tx_tone_idx];
     tx_send_ta(tone_hz);
   }
 
@@ -3500,8 +3544,8 @@ static void tx_tick() {
   }
 
   // All tones sent?
-  if (g_tx_tone_idx >= 79) {
-    ESP_LOGI(TAG, "tx_tick: TX complete, all 79 tones sent");
+  if (g_tx_tone_idx >= g_protocol->total_symbols) {
+    ESP_LOGI(TAG, "tx_tick: TX complete, all %d tones sent", g_protocol->total_symbols);
     if (g_tx_cat_ok) {
       radio_control_end_tx();
     }
@@ -3521,15 +3565,14 @@ static void tx_tick() {
   ESP_LOGD("TXTONE", "%02d %u", g_tx_tone_idx, (unsigned)g_tx_tones[g_tx_tone_idx]);
   fft_waterfall_tx_tone(g_tx_tones[g_tx_tone_idx]);
   if (g_tx_cat_ok) {
-    float tone_hz = g_tx_base_hz + 6.25f * g_tx_tones[g_tx_tone_idx];
+    float tone_hz = g_tx_base_hz + g_protocol->tone_spacing * g_tx_tones[g_tx_tone_idx];
     tx_send_ta(tone_hz);
   }
 
   // Advance to next tone
   g_tx_tone_idx++;
-  // Calculate next tone time from slot boundary to ensure TX ends at correct time
-  // This guarantees RX can start cleanly at the next slot boundary
-  g_tx_next_tone_time = g_tx_slot_start_ms + g_tx_tone_idx * 160;
+  int symbol_period_ms = (int)(g_protocol->symbol_period * 1000);
+  g_tx_next_tone_time = g_tx_slot_start_ms + g_tx_tone_idx * symbol_period_ms;
 }
 
 static void draw_menu_view() {
@@ -3592,6 +3635,7 @@ static void draw_menu_view() {
   } else {
     lines.push_back(std::string("Max Retry:") + std::to_string(g_autoseq_max_retry));
   }
+  lines.push_back(std::string("Protocol:") + (g_protocol == &kProtocolFT4 ? "FT4" : "FT8"));
 
   int highlight_abs = -1;
   if (menu_edit_idx >= 0) {
@@ -3684,7 +3728,7 @@ static void draw_gps_view(bool force_redraw) {
 }
 
 static void draw_status_view() {
-  std::string lines[6];
+  std::string lines[7];
   BeaconMode disp_beacon = (ui_mode == UIMode::STATUS) ? g_status_beacon_temp : g_beacon;
   lines[0] = std::string("Beacon: ") + beacon_name(disp_beacon);
   lines[1] = status_sync_line();
@@ -3702,7 +3746,8 @@ static void draw_status_view() {
   } else {
     lines[5] = std::string("Time: ") + g_time;
   }
-  for (int i = 0; i < 6; ++i) {
+  lines[6] = std::string("Protocol: ") + (g_protocol == &kProtocolFT4 ? "FT4" : "FT8");
+  for (int i = 0; i < 7; ++i) {
     bool hl = (status_edit_idx == i);
     draw_status_line(i, lines[i], hl);
   }
@@ -4805,9 +4850,16 @@ static void load_station_data() {
   while (fgets(line, sizeof(line), f)) {
     int idx = -1;
     int val = 0;
-    if (sscanf(line, "band%d=%d", &idx, &val) == 2) {
-      if (idx >= 0 && idx < (int)g_bands.size()) {
-        g_bands[idx].freq = val;
+    float val_f = 0.0f;
+    long long epoch_tmp = 0;
+    if (sscanf(line, "ft8_band%d=%f", &idx, &val_f) == 2) {
+      if (idx >= 0 && idx < (int)g_ft8_bands.size()) g_ft8_bands[idx].freq = val_f;
+    } else if (sscanf(line, "ft4_band%d=%f", &idx, &val_f) == 2) {
+      if (idx >= 0 && idx < (int)g_ft4_bands.size()) g_ft4_bands[idx].freq = val_f;
+    } else if (sscanf(line, "band%d=%d", &idx, &val) == 2) {
+      // Legacy fallback
+      if (idx >= 0 && idx < (int)g_ft8_bands.size()) {
+        g_ft8_bands[idx].freq = val;
       }
     } else if (sscanf(line, "beacon=%d", &val) == 1) {
       // beacon persists OFF only; ignore saved value
@@ -4860,11 +4912,11 @@ static void load_station_data() {
       g_ble_enabled = (val != 0);
     } else if (sscanf(line, "rtc_comp=%d", &val) == 1) {
       g_rtc_comp = clamp_rtc_comp_value(val);
-    } else {
-      long long epoch_tmp = 0;
-      if (sscanf(line, "rtc_sleep_epoch=%lld", &epoch_tmp) == 1) {
-        g_rtc_sleep_epoch = (time_t)epoch_tmp;
-      }
+    } else if (sscanf(line, "rtc_sleep_epoch=%lld", &epoch_tmp) == 1) {
+      g_rtc_sleep_epoch = (time_t)epoch_tmp;
+    } else if (sscanf(line, "protocol_mode=%d", &val) == 1) {
+      if (val == 1) g_protocol = &kProtocolFT4;
+      else g_protocol = &kProtocolFT8;
     }
   }
   fclose(f);
@@ -4886,8 +4938,11 @@ static void save_station_data() {
     ESP_LOGE(TAG, "Failed to open %s for write", STATION_FILE);
     return;
   }
-  for (size_t i = 0; i < g_bands.size(); ++i) {
-    fprintf(f, "band%u=%d\n", (unsigned)i, g_bands[i].freq);
+  for (size_t i = 0; i < g_ft8_bands.size(); ++i) {
+    fprintf(f, "ft8_band%u=%.1f\n", (unsigned)i, g_ft8_bands[i].freq);
+  }
+  for (size_t i = 0; i < g_ft4_bands.size(); ++i) {
+    fprintf(f, "ft4_band%u=%.1f\n", (unsigned)i, g_ft4_bands[i].freq);
   }
   // Beacon is not persisted (stays OFF on reload)
   fprintf(f, "offset=%d\n", g_offset_hz);
@@ -4911,6 +4966,7 @@ static void save_station_data() {
   fprintf(f, "rtc_comp=%d\n", g_rtc_comp);
   fprintf(f, "autoseq_max_retry=%d\n", g_autoseq_max_retry);
   fprintf(f, "ble_enabled=%d\n", g_ble_enabled ? 1 : 0);
+  fprintf(f, "protocol_mode=%d\n", (g_protocol == &kProtocolFT4) ? 1 : 0);
   fclose(f);
 }
 
@@ -4922,7 +4978,7 @@ static void enter_mode(UIMode new_mode) {
       g_beacon = g_status_beacon_temp;
       save_station_data();
       // No need to clear autoseq when beacon is turned off.
-      // Any CQ in queue will transmit once, then tick moves CALLING→IDLE.
+      // Any CQ in queue will transmit once, then tick moves CALLINGΓåÆIDLE.
       g_tx_view_dirty = true;
 
       // If beacon was just enabled, enqueue CQ and set TX flag
@@ -4943,7 +4999,7 @@ static void enter_mode(UIMode new_mode) {
 
     // Auto-sync VFO + RX mode on STATUS exit. Picks up any in-STATUS
     // changes (band advance via S->3, etc.) without needing a manual
-    // "Sync to QMX" button press. Idempotent — safe even if the same
+    // "Sync to QMX" button press. Idempotent ΓÇö safe even if the same
     // sync already fired (e.g. from S->3 in-menu push, or from the
     // initial-connect path for QMX). For KH1 this is the primary sync
     // path (UART CAT has no discrete "first connect" event).
@@ -4955,6 +5011,8 @@ static void enter_mode(UIMode new_mode) {
   }
   ui_mode = new_mode;
   rx_flash_idx = -1;
+  // Clear the text area below waterfall/countdown to prevent stray pixels
+  M5.Display.fillRect(0, UI_START_Y, 240, 135 - UI_START_Y, TFT_BLACK);
   switch (ui_mode) {
     case UIMode::RX:
       // Force RX list redraw
@@ -5248,7 +5306,7 @@ autoseq_set_cabrillo_fd_callback(log_cabrillo_fd_entry);
   s_key_inject_queue = xQueueCreate(32, sizeof(char));
 
   // sdkconfig puts the ESP console on UART0 peripheral with TX=G13,
-  // but IDF's custom-console init only guarantees the TX pin routing —
+  // but IDF's custom-console init only guarantees the TX pin routing ΓÇö
   // it doesn't always hook up RX. Explicitly route G15 to UART0 RXD.
   // This is a no-op if already set, and doesn't install a driver.
   uart_set_pin(UART_NUM_0, UART_PIN_NO_CHANGE, GPIO_NUM_15,
@@ -5606,6 +5664,13 @@ autoseq_set_cabrillo_fd_callback(log_cabrillo_fd_entry);
           switched = true;
         }
       }
+      else if (c == 'p' || c == 'P') {
+        g_protocol = (g_protocol == &kProtocolFT8) ? &kProtocolFT4 : &kProtocolFT8;
+        save_station_data();
+        switched = true;
+        debug_log_line(g_protocol == &kProtocolFT4 ? "Mode: FT4" : "Mode: FT8");
+        sync_radio_to_current_band("protocol switch");
+      }
       else if (c == 'd' || c == 'D') { cancel_status_edit(); enter_mode(ui_mode == UIMode::DEBUG ? UIMode::RX : UIMode::DEBUG); switched = true; }
       else if (c == 's' || c == 'S') { cancel_status_edit(); enter_mode(ui_mode == UIMode::STATUS ? UIMode::RX : UIMode::STATUS); switched = true; }
       else if (c == 'g' || c == 'G') { cancel_status_edit(); enter_mode(ui_mode == UIMode::GPS ? UIMode::RX : UIMode::GPS); switched = true; }
@@ -5763,31 +5828,25 @@ autoseq_set_cabrillo_fd_callback(log_cabrillo_fd_entry);
             save_station_data();
             draw_status_view();
             debug_log_line("Band changed");
-            // In-memory only. CAT push is deferred to:
-            //   - STATUS exit (enter_mode), or
-            //   - QMX initial-connect (consume_cdc_initial_sync reads
-            //     current g_band_sel at sync time, so band edits made
-            //     while QMX was still enumerating get picked up).
-            // Why deferred: KH1 band change engages a physical antenna
-            // relay, and we don't want to click it on every S->3 press.
+            sync_radio_to_current_band("band changed");
           }
-              else if (c == '4') {
-                g_tune = !g_tune;
-                if (radio_control_ready()) {
-                  int freq_hz = g_bands[g_band_sel].freq * 1000;
-                  int tune_hz = (g_offset_src == OffsetSrc::CURSOR) ? g_offset_hz : 1500;
-                  if (radio_control_set_tune(g_tune, freq_hz, tune_hz) == ESP_OK) {
-                    debug_log_line(g_tune ? "CAT tune: TX" : "CAT tune: RX");
-                  } else {
-                    ESP_LOGW(TAG, "CAT tune command failed");
-                    debug_log_line("CAT tune failed");
-                  }
-                } else {
-                  ESP_LOGW(TAG, "CAT not ready; tune skipped");
-                }
-                draw_status_view();
+          else if (c == '4') {
+            g_tune = !g_tune;
+            if (radio_control_ready()) {
+              int freq_hz = g_bands[g_band_sel].freq * 1000;
+              int tune_hz = (g_offset_src == OffsetSrc::CURSOR) ? g_offset_hz : 1500;
+              if (radio_control_set_tune(g_tune, freq_hz, tune_hz) == ESP_OK) {
+                debug_log_line(g_tune ? "CAT tune: TX" : "CAT tune: RX");
+              } else {
+                ESP_LOGW(TAG, "CAT tune command failed");
+                debug_log_line("CAT tune failed");
               }
-              else if (c == '5') {
+            } else {
+              ESP_LOGW(TAG, "CAT not ready; tune skipped");
+            }
+            draw_status_view();
+          }
+          else if (c == '5') {
                 status_edit_idx = 4; status_edit_buffer = g_date; status_cursor_pos = 0; while (status_cursor_pos < (int)status_edit_buffer.size() && (status_edit_buffer[status_cursor_pos] == '-')) status_cursor_pos++; draw_status_view();
 #if ENABLE_BLE
                 if (c_from_ble) ble_enter_text_mode();
@@ -5798,6 +5857,13 @@ autoseq_set_cabrillo_fd_callback(log_cabrillo_fd_entry);
 #if ENABLE_BLE
                 if (c_from_ble) ble_enter_text_mode();
 #endif
+              }
+              else if (c == '7') {
+                g_protocol = (g_protocol == &kProtocolFT8) ? &kProtocolFT4 : &kProtocolFT8;
+                save_station_data();
+                draw_status_view();
+                debug_log_line(g_protocol == &kProtocolFT4 ? "Mode: FT4" : "Mode: FT8");
+                sync_radio_to_current_band("protocol switch");
               }
             } else {
               if (status_edit_idx == 1) {
@@ -5978,7 +6044,6 @@ autoseq_set_cabrillo_fd_callback(log_cabrillo_fd_entry);
                 }
                 draw_menu_view();
               }
-              break;
             } else if (menu_edit_idx >= 0) {
               if (c == '\n' || c == '\r') {
                 bool should_save = true;
@@ -6080,13 +6145,12 @@ autoseq_set_cabrillo_fd_callback(log_cabrillo_fd_entry);
                 }
               }
               break;
-            }
-
-        if (c == ';') {
-          if (menu_page > 0) { menu_page--; draw_menu_view(); }
-        } else if (c == '.') {
-          if (menu_page < 2) { menu_page++; draw_menu_view(); }
-        } else if (menu_page == 0) {
+            } else {
+              if (c == ';') {
+                if (menu_page > 0) { menu_page--; draw_menu_view(); }
+              } else if (c == '.') {
+                if (menu_page < 3) { menu_page++; draw_menu_view(); }
+              } else if (menu_page == 0) {
               if (c == '1') {
                 g_cq_type = (CqType)(((int)g_cq_type + 1) % 6);
                 if (g_cq_type == CqType::CQFREETEXT) g_cq_freetext = g_free_text;
@@ -6095,14 +6159,14 @@ autoseq_set_cabrillo_fd_callback(log_cabrillo_fd_entry);
                 draw_menu_view();
               } else if (c == '2') {
                 // Send Free Text via autoseq queue. FT is a one-shot entry
-                // that sorts to the FRONT of the active queue — guarantees
+                // that sorts to the FRONT of the active queue ΓÇö guarantees
                 // the next TX is the FT, preempting any active QSO. The QSO
                 // ctx is preserved (FT is one-shot, popped after TX) and
                 // resumes on the slot after FT fires.
                 // Slot parity: inherits from queue[0] if non-empty (joins
                 // the current activation period); uses next-slot fallback
                 // if empty.
-                int64_t now_slot = rtc_now_ms() / 15000;
+                int64_t now_slot = rtc_now_ms() / g_protocol->slot_time_ms;
                 int fallback_parity = (int)((now_slot + 1) & 1);
                 if (autoseq_schedule_freetext(g_free_text, fallback_parity)) {
                   // Re-fetch and update g_pending_tx so the FT replaces any
@@ -6264,12 +6328,21 @@ autoseq_set_cabrillo_fd_callback(log_cabrillo_fd_entry);
                 if (c_from_ble) ble_enter_text_mode();
 #endif
               }
+            } else if (menu_page == 3) {
+              if (c == '1') {
+                if (g_protocol == &kProtocolFT4) g_protocol = &kProtocolFT8;
+                else g_protocol = &kProtocolFT4;
+                save_station_data();
+                draw_menu_view();
+                debug_log_line(g_protocol == &kProtocolFT4 ? "Mode: FT4" : "Mode: FT8");
+              }
             }
           }
-          break;
         }
+        break;
       }
     }
+  }
 
 #if ENABLE_BLE
     if (g_ble_text_mode && !ble_text_target_active()) {
@@ -6277,7 +6350,8 @@ autoseq_set_cabrillo_fd_callback(log_cabrillo_fd_entry);
     }
 #endif
 
-    vTaskDelay(pdMS_TO_TICKS(10));
+    int loop_delay_ms = g_tx_active ? 2 : 10;
+    vTaskDelay(pdMS_TO_TICKS(loop_delay_ms));
   }
 }
 
@@ -6286,8 +6360,8 @@ extern "C" void app_main(void) {
   xTaskCreatePinnedToCore(app_task_core0, "app_core0", APP_CORE0_STACK_BYTES, nullptr, 5, nullptr, 0);
 }
 static void draw_status_line(int idx, const std::string& text, bool highlight) {
-  const int line_h = 19;
-  const int start_y = 18 + 3 + 3; // WATERFALL_H + COUNTDOWN_H + gap
+  const int line_h = 16;
+  const int start_y = UI_START_Y; // WATERFALL_H + COUNTDOWN_H
   int y = start_y + idx * line_h;
   uint16_t bg = highlight ? M5.Display.color565(30, 30, 60) : TFT_BLACK;
   M5.Display.setTextSize(2);

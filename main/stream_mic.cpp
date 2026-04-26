@@ -1,6 +1,7 @@
 #include "stream_mic.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "protocol.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "ui.h"
@@ -74,7 +75,7 @@ void stream_mic_task(void* /*arg*/) {
   mon_cfg.sample_rate = FT8_SAMPLE_RATE;
   mon_cfg.time_osr = g_time_osr;
   mon_cfg.freq_osr = g_freq_osr;
-  mon_cfg.protocol = FTX_PROTOCOL_FT8;
+  mon_cfg.protocol = g_protocol->protocol_id;
 
   monitor_t mon;
   monitor_init(&mon, &mon_cfg);
@@ -88,7 +89,7 @@ void stream_mic_task(void* /*arg*/) {
     return;
   }
 
-  const int target_blocks = 80; // 79 symbols ~=12.64s; one-frame margin
+  const int target_blocks = g_protocol->total_symbols + 1; // 79 symbols ~=12.64s; one-frame margin
 
   while (true) {
     if (g_streaming) {
@@ -102,8 +103,8 @@ void stream_mic_task(void* /*arg*/) {
     // Wait to slot boundary (00/15/30/45s)
     {
       int64_t now_ms = rtc_now_ms();
-      int64_t rem = now_ms % 15000;
-      int64_t wait_ms = (rem < 100) ? 0 : (15000 - rem);
+      int64_t rem = now_ms % g_protocol->slot_time_ms;
+      int64_t wait_ms = (rem < 100) ? 0 : (g_protocol->slot_time_ms - rem);
       if (wait_ms > 0) vTaskDelay(pdMS_TO_TICKS((uint32_t)wait_ms));
     }
 
@@ -149,7 +150,7 @@ void stream_mic_task(void* /*arg*/) {
       }
 
       monitor_process(&mon, chunk);
-      vTaskDelayUntil(&next_wake, pdMS_TO_TICKS(160));
+      vTaskDelayUntil(&next_wake, pdMS_TO_TICKS((uint32_t)(g_protocol->symbol_period * 1000.0f)));
     }
 
     // If WAV streaming started, skip decode and continue

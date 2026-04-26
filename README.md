@@ -46,6 +46,7 @@ Mini-FT8 is built on Karlis Goba’s ft8_lib. It’s also a joint adventure betw
 ## Global Keys and Navigation
 
 - `R` / `T` / `B` / `S` / `G` / `Q` / `F` / `D` / `C`: switch to the selected mode. Press the same mode key again to return to `RX`.
+- `4` / `8`: switch protocol to FT4 or FT8 globally.
 - `M` / `N` / `O`: jump to MENU page 1 / 2 / 3. Press the current page key again to return to `RX`.
 - `` ` ``: cancel TX globally in `RX`, `TX`, and `STATUS` when not editing.
 - `▲` / `▼`: page up / page down in `RX`, `TX`, `BAND`, `MENU`, `QSO`, `Fetch`, and `Delete`.
