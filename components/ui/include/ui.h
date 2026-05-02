@@ -3,6 +3,13 @@
 #include <string>
 #include <stdint.h>
 
+#define SCREEN_W 240
+#define SCREEN_H 135
+#define WATERFALL_H 18
+#define COUNTDOWN_H 3
+#define UI_START_Y (WATERFALL_H + COUNTDOWN_H) // 21
+#define RX_LINES 6
+
 // A lightweight RX line format you can fill from your decoder
 struct UiRxLine {
     std::string text;  // already formatted for display

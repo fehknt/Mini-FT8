@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "main.cpp"
+    SRCS "stream_mic.cpp" "main.cpp"
          "autoseq.cpp"
          "audio_source.cpp"
          "ble_native.cpp"

@@ -6,9 +6,9 @@
 
 static const char* TAG_MIC = "MIC_INPUT";
 #ifndef FT8_SAMPLE_RATE
-#define FT8_SAMPLE_RATE 12000
+#define FT8_SAMPLE_RATE 6000
 #endif
-// Capture at 17 kHz (matches M5 Mic example) and resample down to 12 kHz.
+// Capture at 17 kHz (matches M5 Mic example) and resample down to 6 kHz.
 static const int MIC_CAPTURE_RATE = 17000;
 
 static bool s_inited = false;

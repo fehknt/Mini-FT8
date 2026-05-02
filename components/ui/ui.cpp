@@ -4,12 +4,6 @@
 #include <cstring>
 #include "freertos/semphr.h"
 
-static constexpr int SCREEN_W = 240;
-static constexpr int SCREEN_H = 135;
-// Layout: 18px waterfall, 3px countdown bar, 6 lines: each 16px text + 3px gap
-static constexpr int WATERFALL_H = 18;
-static constexpr int COUNTDOWN_H = 3;
-static constexpr int RX_LINES = 6;
 static bool ui_paused = false;      // waterfall updates paused
 
 static uint8_t waterfall[WATERFALL_H][SCREEN_W];
@@ -65,7 +59,7 @@ void ui_draw_waterfall_if_dirty() { if (waterfall_dirty) ui_draw_waterfall(); }
 // slot_colors: optional per-line slot parity (0 even, 1 odd) for coloring text
 void ui_draw_tx(const std::string& next, const std::vector<std::string>& queue, int page, int selected, const std::vector<bool>& mark_delete, const std::vector<int>& slot_colors) {
     const int line_h = 19; // 16 text + 3 gap
-    const int start_y = WATERFALL_H + COUNTDOWN_H + 3;
+    const int start_y = UI_START_Y;
 
     DispGuard guard;
     M5.Display.startWrite();
@@ -303,7 +297,7 @@ static void draw_rx_line(int y, const RxDecodeEntry& l, int line_no, bool select
 void ui_draw_rx(int flash_index) {
     const int line_h = 19; // 16 text + 3 gap
     // Add a 3px gap below the countdown before the first line
-    const int start_y = WATERFALL_H + COUNTDOWN_H + 3;
+    const int start_y = UI_START_Y;
     // Only redraw when page changes or content changes, but always draw if list is empty
     if (rx_lines_count > 0 && flash_index < 0) {
         if (rx_page == last_page && last_drawn_count == rx_lines_count) {
@@ -386,7 +380,7 @@ int ui_handle_rx_key(char c) {
 // Simple numbered list drawing helper (6 lines/page), optional highlight by absolute index
 void ui_draw_list(const std::vector<std::string>& lines, int page, int highlight_abs) {
     const int line_h = 19; // 16 text + 3 gap
-    const int start_y = WATERFALL_H + COUNTDOWN_H + 3;
+    const int start_y = UI_START_Y;
     DispGuard guard;
     M5.Display.startWrite();
     M5.Display.setTextSize(2);
@@ -409,7 +403,7 @@ void ui_draw_list(const std::vector<std::string>& lines, int page, int highlight
 
 void ui_draw_debug(const std::vector<std::string>& lines, int page) {
     const int line_h = 19;
-    const int start_y = WATERFALL_H + COUNTDOWN_H + 3;
+    const int start_y = UI_START_Y;
     DispGuard guard;
     M5.Display.startWrite();
     M5.Display.setTextSize(2);
