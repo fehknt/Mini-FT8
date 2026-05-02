@@ -4,7 +4,11 @@
 #include "ldpc.h"
 
 #include <stdbool.h>
+#include <stdlib.h>
 #include <math.h>
+#ifdef _MSC_VER
+#include <malloc.h>
+#endif
 
 // #define LOG_LEVEL LOG_DEBUG
 // #include "debug.h"
@@ -513,7 +517,12 @@ static void ft8_decode_multi_symbols(const WF_ELEM_T* wf, int num_bins, int n_sy
     const int n_bits = 3 * n_syms;
     const int n_tones = (1 << n_bits);
 
-    float s2[n_tones];
+    // VLA compatibility: use alloca for MSVC, malloc for portability
+    float* s2 = (float*)malloc(sizeof(float) * n_tones);
+    if (s2 == NULL) {
+        // Not enough memory - shouldn't happen in practice
+        return;
+    }
 
     for (int j = 0; j < n_tones; ++j)
     {
@@ -562,6 +571,8 @@ static void ft8_decode_multi_symbols(const WF_ELEM_T* wf, int num_bins, int n_sy
 
         log174[bit_idx + i] = max_one - max_zero;
     }
+
+    free(s2);
 }
 
 // Packs a string of bits each represented as a zero/non-zero byte in plain[],
