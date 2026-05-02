@@ -2,9 +2,12 @@
 #include <cstring>
 #include <vector>
 #include <cmath>
+#include <map>
+#include <string>
 #include "decode_helper.h"
 #include "synth.h"
 #include "../../components/ft8_lib/ft8/encode.h"
+
 
 // Test case structure
 struct TestCase {
@@ -48,7 +51,7 @@ static const int NUM_CASES = sizeof(CASES) / sizeof(CASES[0]);
 
 int main() {
     int passed = 0, failed = 0;
-    const int SAMPLE_RATE = 12000;
+    const int SAMPLE_RATE = 6000;  // Match firmware's monitor sample rate
     const float AMPLITUDE = 0.5f;
 
     printf("L1 Encoder Test — %d cases\n", NUM_CASES);
@@ -62,14 +65,10 @@ int main() {
                c.text, c.base_hz);
         fflush(stdout);
 
-        // Step 1: Encode message to payload
-        fprintf(stderr, "  encoding message...\n");
-        fflush(stderr);
+        // Step 1: Encode message to payload (use decoder's hash table for consistency)
+        decode_clear_hashes();  // Clear hashes from previous tests
         ftx_message_t msg;
-        ftx_callsign_hash_interface_t hash_if = {nullptr, nullptr};
-        ftx_message_rc_t rc = ftx_message_encode(&msg, &hash_if, c.text);
-        fprintf(stderr, "  encode result: %d\n", rc);
-        fflush(stderr);
+        ftx_message_rc_t rc = ftx_message_encode(&msg, decode_get_hash_if(), c.text);
         if (rc != FTX_MESSAGE_RC_OK) {
             printf("FAIL (encode error %d)\n", rc);
             failed++;
@@ -82,30 +81,27 @@ int main() {
         float sym_period, spacing;
         if (c.proto == FTX_PROTOCOL_FT8) {
             ft8_encode(msg.payload, tones);
-            nn = FT8_NN;
-            sym_period = FT8_SYMBOL_PERIOD;
-            spacing = 6.25f;
+            nn = FT8_NN; sym_period = FT8_SYMBOL_PERIOD; spacing = 6.25f;
         } else {
             ft4_encode(msg.payload, tones);
-            nn = FT4_NN;
-            sym_period = FT4_SYMBOL_PERIOD;
-            spacing = 20.8333f;
+            nn = FT4_NN; sym_period = FT4_SYMBOL_PERIOD; spacing = 20.8333f;
         }
+        fprintf(stderr, "  tones ok nn=%d\n", nn); fflush(stderr);
 
         // Step 3: Synthesize audio with pre/post padding
-        int padding_samples = (int)(0.5f * SAMPLE_RATE);  // 0.5s padding
-        int tone_samples = (int)(nn * sym_period * SAMPLE_RATE);
-        int total_samples = padding_samples + tone_samples + padding_samples;
-
+        int padding_samples = (int)(0.5f * SAMPLE_RATE);
+        int total_samples = padding_samples + (int)(nn * sym_period * SAMPLE_RATE) + padding_samples;
         std::vector<float> pcm(total_samples, 0.0f);
-
         int synth_len = 0;
         synth_fsk(tones, nn, sym_period, c.base_hz, spacing,
                   SAMPLE_RATE, AMPLITUDE,
                   pcm.data() + padding_samples, &synth_len);
+        fprintf(stderr, "  synth ok %d samples\n", total_samples); fflush(stderr);
 
         // Step 4: Decode the audio
+        fprintf(stderr, "  calling decode_pcm...\n"); fflush(stderr);
         DecodeResult decode_result = decode_pcm(pcm.data(), pcm.size(), SAMPLE_RATE, c.proto);
+        fprintf(stderr, "  decode done found=%d\n", decode_result.found); fflush(stderr);
 
         // Step 5: Compare results
         char norm_input[256], norm_output[256];

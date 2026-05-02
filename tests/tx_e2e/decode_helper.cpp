@@ -29,6 +29,14 @@ static ftx_callsign_hash_interface_t g_hash_if = {
     .save_hash = hash_save
 };
 
+ftx_callsign_hash_interface_t* decode_get_hash_if(void) {
+    return &g_hash_if;
+}
+
+void decode_clear_hashes(void) {
+    g_hash_table.clear();
+}
+
 void normalize_text(const char* text, char* out_norm, int out_len) {
     if (!text || !out_norm || out_len <= 0) return;
 
@@ -67,16 +75,15 @@ void normalize_text(const char* text, char* out_norm, int out_len) {
 DecodeResult decode_pcm(const float* samples, int n_samples, int fs,
                         ftx_protocol_t proto) {
     DecodeResult result = {false, "", 0.0f};
-    fprintf(stderr, "decode_pcm: n_samples=%d, fs=%d, proto=%d\n", n_samples, fs, proto);
-    fflush(stderr);
 
-    // Initialize monitor configuration
+    // Use firmware-compatible settings to fit monitor.c's static buffer (MONITOR_NFFT_MAX=960)
+    // At 6kHz with freq_osr=1: nfft = 960, matches static allocation exactly
     monitor_config_t cfg = {
         .f_min = 200.0f,
         .f_max = 2900.0f,
-        .sample_rate = fs,
-        .time_osr = 2,
-        .freq_osr = 2,
+        .sample_rate = fs,        // Use input sample rate (test provides 6kHz)
+        .time_osr = 2,            // Firmware default
+        .freq_osr = 1,            // Critical: >= 2 would exceed MONITOR_NFFT_MAX (960)
         .protocol = proto
     };
 

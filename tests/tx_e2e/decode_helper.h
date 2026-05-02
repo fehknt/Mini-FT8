@@ -17,6 +17,12 @@ typedef struct {
     float snr;
 } DecodeResult;
 
+/// Get the hash interface used by decoder (for test synchronization)
+ftx_callsign_hash_interface_t* decode_get_hash_if(void);
+
+/// Clear the hash table (call between test cases)
+void decode_clear_hashes(void);
+
 /// Decode PCM samples using ft8_lib reference decoder
 ///
 /// @param samples     PCM samples (float, -1.0 to 1.0 range)
