@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdint.h>
 #include "ft8/constants.h"
 
 struct ProtocolConfig {
@@ -37,5 +38,4 @@ extern volatile const ProtocolConfig* g_protocol;  // volatile for dual-core cac
 // Bumped by the UI thread whenever g_protocol changes. Stream tasks watch
 // this value and re-init their monitor_t in place at the next slot boundary
 // so we never tear down USB (which would disconnect QMX CAT).
-#include <stdint.h>
 extern volatile uint32_t g_protocol_change_seq;

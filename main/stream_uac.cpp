@@ -8,6 +8,7 @@
 #include "freertos/semphr.h"
 #include "esp_log.h"
 #include "esp_err.h"
+#include "esp_attr.h"
 #include "usb/usb_host.h"
 #include "usb/uac_host.h"
 #include "usb/cdc_acm_host.h"
@@ -53,6 +54,12 @@ int64_t rtc_now_ms();
 // UAC read buffer size (bytes) - must be multiple of 288 (USB transfer size at 48kHz/24bit/stereo)
 // 288 bytes = 48 stereo samples per 1ms USB transfer, 4608 = 288 * 16
 #define UAC_READ_BUFFER_SIZE    4608
+
+// USB host DMA buffer — placed in DMA-capable BSS via DMA_ATTR so task startup
+// doesn't depend on finding a large DMA-aligned heap block under fragmentation.
+// heap_caps_malloc(MALLOC_CAP_DMA) can fail even when raw free bytes look
+// sufficient because DMA alignment requirements eat into contiguous runs.
+static DMA_ATTR uint8_t s_usb_dma_buffer[UAC_READ_BUFFER_SIZE];
 
 typedef struct {
     uint32_t sample_freq;
@@ -402,8 +409,24 @@ static void usb_lib_task(void* arg) {
         ESP_LOGI(TAG, "CDC-ACM driver uninstalled");
     }
 
+    // Drain pending USB host events before uninstall. usb_host_uninstall()
+    // refuses to release the PHY while client-detach/all-free events are
+    // still pending, which blocks the subsequent TinyUSB device-mode MSC path.
+    for (int i = 0; i < 50; ++i) {
+        uint32_t event_flags = 0;
+        usb_host_lib_handle_events(pdMS_TO_TICKS(20), &event_flags);
+        if (event_flags & USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS) {
+            usb_host_device_free_all();
+        }
+        if (event_flags & USB_HOST_LIB_EVENT_FLAGS_ALL_FREE) {
+            break;
+        }
+    }
     ESP_LOGI(TAG, "USB Host uninstalling");
-    usb_host_uninstall();
+    esp_err_t uerr = usb_host_uninstall();
+    if (uerr != ESP_OK) {
+        ESP_LOGW(TAG, "usb_host_uninstall: %s", esp_err_to_name(uerr));
+    }
     s_usb_task_handle = NULL;
     vTaskDelete(NULL);
 }
@@ -530,12 +553,26 @@ static void uac_lib_task(void* arg) {
                     // Try to open companion CDC-ACM interface (CAT)
                     cdc_try_open();
 
-                    // Start the audio processing task
+                    // Start the audio processing task using a STATIC stack
+                    // (BSS) so task creation doesn't depend on finding a
+                    // contiguous 8 KB block in a fragmented heap.
                     if (s_stream_task_handle == NULL) {
-                        xTaskCreatePinnedToCore(stream_uac_task, "stream_uac",
-                                                STREAM_TASK_STACK_SIZE, NULL,
-                                                UAC_STREAM_TASK_PRIORITY,
-                                                &s_stream_task_handle, 1);
+                        static StackType_t  s_stream_task_stack[STREAM_TASK_STACK_SIZE / sizeof(StackType_t)];
+                        static StaticTask_t s_stream_task_tcb;
+                        size_t free_before = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
+                        size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT);
+                        ESP_LOGI(TAG, "Pre-task-create heap: free=%u largest=%u",
+                                 (unsigned)free_before, (unsigned)largest);
+                        s_stream_task_handle = xTaskCreateStaticPinnedToCore(
+                            stream_uac_task, "stream_uac",
+                            STREAM_TASK_STACK_SIZE / sizeof(StackType_t), NULL,
+                            UAC_STREAM_TASK_PRIORITY,
+                            s_stream_task_stack, &s_stream_task_tcb, 1);
+                        if (!s_stream_task_handle) {
+                            ESP_LOGE(TAG, "stream_uac_task create FAILED "
+                                     "(static) free=%u largest=%u",
+                                     (unsigned)free_before, (unsigned)largest);
+                        }
                     }
 
                 } else if (evt.driver.event == UAC_HOST_DRIVER_EVENT_TX_CONNECTED) {
@@ -593,15 +630,16 @@ static void stream_uac_task(void* arg) {
     // monitor->block_size = sample_rate * symbol_period (no time_osr division).
     // FT8: 6000*0.160=960, FT4: 6000*0.048=288 — always allocate for FT8.
     const int max_block_size = (int)((float)FT8_SAMPLE_RATE * FT8_SYMBOL_PERIOD) + 8;
-    uint8_t* usb_buffer = (uint8_t*)heap_caps_malloc(UAC_READ_BUFFER_SIZE, MALLOC_CAP_DEFAULT);
+    // USB DMA buffer lives in DMA-capable BSS (s_usb_dma_buffer above).
+    // Only the float working buffers need heap allocation.
+    uint8_t* usb_buffer = s_usb_dma_buffer;
     float* ft8_buffer = (float*)heap_caps_malloc(sizeof(float) * max_block_size, MALLOC_CAP_DEFAULT);
     // Intermediate 6kHz output buffer from PCM conversion/resampling.
     float* temp_dec = (float*)heap_caps_malloc(sizeof(float) * 512, MALLOC_CAP_DEFAULT);
     log_heap("UAC_AFTER_FFT_ALLOC");
 
-    if (!usb_buffer || !ft8_buffer || !temp_dec) {
-        ESP_LOGE(TAG, "Buffer allocation failed");
-        if (usb_buffer) free(usb_buffer);
+    if (!ft8_buffer || !temp_dec) {
+        ESP_LOGE(TAG, "Buffer allocation failed: ft8=%p temp=%p", ft8_buffer, temp_dec);
         if (ft8_buffer) free(ft8_buffer);
         if (temp_dec) free(temp_dec);
         monitor_free(&mon);
@@ -783,8 +821,7 @@ static void stream_uac_task(void* arg) {
         }
     }
 
-    // Cleanup
-    free(usb_buffer);
+    // Cleanup — usb_buffer is static BSS (s_usb_dma_buffer), no free.
     free(ft8_buffer);
     free(temp_dec);
     monitor_free(&mon);

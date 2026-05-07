@@ -1052,11 +1052,17 @@ std::vector<BandItem> g_bands = std::vector<BandItem>(g_ft8_bands);  // visible 
 
 // Set the active protocol and sync the band table. Call this instead of
 // assigning g_protocol directly so g_bands stays consistent.
+// Also bumps g_protocol_change_seq so stream tasks reinit at next slot boundary,
+// and clears pending TX to prevent misfires on old-protocol slot timing.
 static void set_protocol(const ProtocolConfig* p) {
     g_protocol = p;
     g_bands = (p == &kProtocolFT4)
               ? std::vector<BandItem>(g_ft4_bands)
               : std::vector<BandItem>(g_ft8_bands);
+    g_protocol_change_seq = g_protocol_change_seq + 1;
+    g_qso_xmit           = false;
+    g_target_slot_parity = -1;
+    g_last_slot_parity   = -1;
 }
 static std::string g_active_band_text = "80 40 20 17 15 12 10";
 static std::vector<int> g_active_band_indices;
@@ -1855,9 +1861,11 @@ static void log_adif_entry(const std::string& dxcall, const std::string& dxgrid,
     snprintf(rst_rcvd_buf, sizeof(rst_rcvd_buf), "<rst_rcvd:%d>%d ",
              (int)snprintf(nullptr, 0, "%d", rst_rcvd), rst_rcvd);
   }
-  fprintf(f, "<call:%zu>%s <gridsquare:%zu>%s <mode:3>FT8<qso_date:8>%s <time_on:6>%s <freq:%zu>%s <station_callsign:%zu>%s <my_gridsquare:%zu>%s %s%s<comment:%zu>%s <eor>\n",
+  const char* mode_name = g_protocol->name;
+  fprintf(f, "<call:%zu>%s <gridsquare:%zu>%s <mode:%zu>%s<qso_date:8>%s <time_on:6>%s <freq:%zu>%s <station_callsign:%zu>%s <my_gridsquare:%zu>%s %s%s<comment:%zu>%s <eor>\n",
           dxcall.size(), dxcall.c_str(),
           dxgrid.size(), dxgrid.c_str(),
+          strlen(mode_name), mode_name,
           date, time_on,
           strlen(freq_str), freq_str,
           g_call.size(), g_call.c_str(),
@@ -2028,7 +2036,7 @@ struct WAVHeader {
   mon_cfg.sample_rate = FT8_SAMPLE_RATE;
   mon_cfg.time_osr = g_time_osr;
   mon_cfg.freq_osr = g_freq_osr;
-  mon_cfg.protocol = FTX_PROTOCOL_FT8;
+  mon_cfg.protocol = g_protocol->protocol_id;
 
   monitor_t mon;
   monitor_init(&mon, &mon_cfg);
@@ -2349,7 +2357,7 @@ static bool handle_kh1_diag_key(char c) {
     return true;
   }
 
-  int freq_hz = g_bands[g_band_sel].freq * 1000;
+  int freq_hz = (int)(g_bands[g_band_sel].freq * 1000.0f);
   int rx_fa = (freq_hz + 5) / 10;
   int tx_fa = rx_fa + ((g_offset_hz + 5) / 10);
 
@@ -3713,11 +3721,12 @@ static bool schedule_manual_pending_tx(const AutoseqTxEntry& pending) {
 
 // Helper to send TA command (deduplicated)
 static void tx_send_ta(float tone_hz) {
-  // Use floorf so ta_int always rounds DOWN → frac always in [0,1) →
-  // ta_frac always 0..100.  Matches qmx_set_tone_hz() rounding logic.
+  // Use floorf so ta_int always rounds DOWN → frac always in [0,1).
+  // Clamp ta_frac to 99: lrintf can round 0.995 up to 100, overflowing %02d.
   int ta_int = (int)floorf(tone_hz);
   float frac = tone_hz - (float)ta_int;   // always in [0.0, 1.0)
-  int ta_frac = (int)lrintf(frac * 100.0f); // always 0..100
+  int ta_frac = (int)lrintf(frac * 100.0f); // 0..100 before clamp
+  if (ta_frac > 99) ta_frac = 99;           // clamp: %02d field is 2 digits max
   if (ta_int == g_tx_last_ta_int && ta_frac == g_tx_last_ta_frac) return;
   if (radio_control_set_tone_hz(tone_hz) == ESP_OK) {
     g_tx_last_ta_int = ta_int;
@@ -4005,7 +4014,7 @@ static void draw_gps_view(bool force_redraw) {
   }
   
   const int line_h = 19;
-  const int start_y = 18 + 3 + 3;
+  const int start_y = UI_START_Y;
 
   M5.Display.startWrite();
   M5.Display.setTextSize(2);
@@ -4459,10 +4468,13 @@ static void ble_slot_second_now(int64_t& slot_idx, int& sec, bool& even_slot) {
 
 static std::string ble_timing_token(int sec, bool even_slot, bool txing) {
   if (sec == 0) return "|";
-  if (sec == 4) return "4";
-  if (sec == 8) return "8";
-  if (sec == 12) return "12";
-  if (txing && (sec == 2 || sec == 6 || sec == 10 || sec == 14)) return "o";
+  // Quarter-slot markers spaced at ~slot_s/4 seconds.
+  // FT8 (slot_s=15): step=4 → marks 4, 8, 12; TX midpoints at 2, 6, 10, 14.
+  // FT4 (slot_s=7):  step=2 → marks 2, 4, 6;  TX midpoints at 1, 3, 5, 7.
+  const int slot_s = (int)(g_protocol->slot_time_ms / 1000);
+  const int step = (slot_s + 2) / 4;  // FT8→4, FT4→2
+  if (step > 0 && (sec % step) == 0) return std::to_string(sec);
+  if (txing && step > 0 && (sec % step) == (step / 2)) return "o";
   return even_slot ? ":" : ".";
 }
 
@@ -4471,7 +4483,10 @@ static std::string ble_blank_waterfall_header() {
 }
 
 static void ble_update_waterfall_header_if_due(int64_t slot_idx, int sec) {
-  if (sec != 12) return;
+  // Update ~3 seconds before slot end, same proportion for both FT8 (→12) and FT4 (→4).
+  const int slot_s = (int)(g_protocol->slot_time_ms / 1000);
+  const int trigger_sec = (slot_s > 3) ? slot_s - 3 : slot_s - 1;
+  if (sec != trigger_sec) return;
   if (g_ble_waterfall_slot_idx == slot_idx) return;
   g_ble_waterfall_slot_idx = slot_idx;
 
@@ -5739,7 +5754,7 @@ static void begin_usb_host_mode() {
       }
     }
   }
-  int freq_hz = g_bands[g_band_sel].freq * 1000;
+  int freq_hz = (int)(g_bands[g_band_sel].freq * 1000.0f);
   if (radio_control_ready()) {
     bool ok = (radio_control_sync_frequency_mode(freq_hz) == ESP_OK);
     debug_log_line(ok ? "CAT sync sent" : "CAT sync failed");
@@ -6229,12 +6244,7 @@ autoseq_set_cabrillo_fd_callback(log_cabrillo_fd_entry);
           debug_log_line("Cannot switch protocol during TX");
         } else {
           set_protocol((g_protocol == &kProtocolFT8) ? &kProtocolFT4 : &kProtocolFT8);
-          g_last_slot_parity = -1;
           g_decode_applied_slot_idx = rtc_now_ms() / g_protocol->slot_time_ms;
-          g_protocol_change_seq = g_protocol_change_seq + 1;
-          // Clear pending TX to prevent misfire on slot boundary computed for old protocol
-          g_qso_xmit = false;
-          g_target_slot_parity = -1;
           save_station_data();
           sync_radio_to_current_band("protocol switch");
           debug_log_line(g_protocol == &kProtocolFT4 ? "Mode: FT4" : "Mode: FT8");
@@ -6364,9 +6374,7 @@ autoseq_set_cabrillo_fd_callback(log_cabrillo_fd_entry);
                   debug_log_line("Cannot switch protocol during TX");
                 } else {
                   set_protocol((g_protocol == &kProtocolFT8) ? &kProtocolFT4 : &kProtocolFT8);
-                  g_last_slot_parity = -1;
                   g_decode_applied_slot_idx = rtc_now_ms() / g_protocol->slot_time_ms;
-                  g_protocol_change_seq = g_protocol_change_seq + 1;
                   save_station_data();
                   sync_radio_to_current_band("protocol switch");
                   debug_log_line(g_protocol == &kProtocolFT4 ? "Mode: FT4" : "Mode: FT8");
@@ -6432,9 +6440,7 @@ autoseq_set_cabrillo_fd_callback(log_cabrillo_fd_entry);
                   debug_log_line("Cannot switch protocol during TX");
                 } else {
                   set_protocol((g_protocol == &kProtocolFT8) ? &kProtocolFT4 : &kProtocolFT8);
-                  g_last_slot_parity = -1;
                   g_decode_applied_slot_idx = rtc_now_ms() / g_protocol->slot_time_ms;
-                  g_protocol_change_seq = g_protocol_change_seq + 1;
                   save_station_data();
                   sync_radio_to_current_band("protocol switch");
                   draw_status_view();
@@ -6932,9 +6938,7 @@ autoseq_set_cabrillo_fd_callback(log_cabrillo_fd_entry);
                   debug_log_line("Cannot switch protocol during TX");
                 } else {
                   set_protocol((g_protocol == &kProtocolFT8) ? &kProtocolFT4 : &kProtocolFT8);
-                  g_last_slot_parity = -1;
                   g_decode_applied_slot_idx = rtc_now_ms() / g_protocol->slot_time_ms;
-                  g_protocol_change_seq = g_protocol_change_seq + 1;
                   save_station_data();
                   sync_radio_to_current_band("protocol switch");
                   draw_menu_view();

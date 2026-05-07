@@ -517,12 +517,11 @@ static void ft8_decode_multi_symbols(const WF_ELEM_T* wf, int num_bins, int n_sy
     const int n_bits = 3 * n_syms;
     const int n_tones = (1 << n_bits);
 
-    // VLA compatibility: use alloca for MSVC, malloc for portability
-    float* s2 = (float*)malloc(sizeof(float) * n_tones);
-    if (s2 == NULL) {
-        // Not enough memory - shouldn't happen in practice
-        return;
-    }
+    // n_syms is always 1..3 in practice; n_tones = 1 << (3*3) = 512 max.
+    // Use a fixed-size stack array to avoid heap allocation inside decode loops.
+    // NOTE: this function is currently guarded by #if 1 in ft8_extract_symbol
+    // (which handles n_syms==1 inline) so it is only reached for n_syms > 1.
+    float s2[512];
 
     for (int j = 0; j < n_tones; ++j)
     {
@@ -571,8 +570,6 @@ static void ft8_decode_multi_symbols(const WF_ELEM_T* wf, int num_bins, int n_sy
 
         log174[bit_idx + i] = max_one - max_zero;
     }
-
-    free(s2);
 }
 
 // Packs a string of bits each represented as a zero/non-zero byte in plain[],

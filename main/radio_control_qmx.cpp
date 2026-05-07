@@ -57,12 +57,14 @@ static esp_err_t qmx_begin_tx(int freq_hz, int tx_base_hz) {
 
 static esp_err_t qmx_set_tone_hz(float tone_hz) {
     // Use floorf so ta_int always rounds DOWN → frac is always in [0, 1) →
-    // ta_frac is always 0..99.  Using lrintf (round-to-nearest) can produce a
-    // negative frac (e.g. 1520.83 → ta_int=1521, frac=-0.17) which formats as
-    // "TA1521.-17;" — an invalid QMX command.
+    // Use floorf so ta_int rounds DOWN → frac in [0.0, 1.0).
+    // Clamp ta_frac to 99: lrintf can round 0.995 up to 100, which overflows
+    // the %02d format field producing e.g. "TA1234.100;" — an invalid command.
+    // FT4's 20.8333 Hz tone spacing triggers this on some tone frequencies.
     int ta_int = (int)floorf(tone_hz);
     float frac = tone_hz - (float)ta_int;   // always in [0.0, 1.0)
-    int ta_frac = (int)lrintf(frac * 100.0f); // always 0..100
+    int ta_frac = (int)lrintf(frac * 100.0f); // 0..100 before clamp
+    if (ta_frac > 99) ta_frac = 99;           // clamp: %02d is 2 digits max
 
     char ta[16];
     snprintf(ta, sizeof(ta), "TA%04d.%02d;", ta_int, ta_frac);
