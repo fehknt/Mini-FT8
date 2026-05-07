@@ -703,7 +703,7 @@ static void stream_uac_task(void* arg) {
                 ft8_buffer_idx = 0;
 
                 // Maintain symbol timing
-                vTaskDelayUntil(&next_wake, pdMS_TO_TICKS((uint32_t)(g_protocol->symbol_period * 1000.0f)));
+                vTaskDelayUntil(&next_wake, pdMS_TO_TICKS((uint32_t)lrintf(g_protocol->symbol_period * 1000.0f)));
 
                 // Align decode to slot boundaries based on RTC
                 slot_blocks++;
@@ -724,6 +724,8 @@ static void stream_uac_task(void* arg) {
                         ESP_LOGI(TAG, "Applying protocol change -> %s", g_protocol->name);
                         monitor_free(&mon);
                         mon_cfg.protocol = g_protocol->protocol_id;
+                        mon_cfg.time_osr = g_time_osr;
+                        mon_cfg.freq_osr = g_freq_osr;
                         monitor_init(&mon, &mon_cfg);
                         target_blocks = g_protocol->total_symbols + 1;
                         last_proto_seq = g_protocol_change_seq;

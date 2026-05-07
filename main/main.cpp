@@ -1032,6 +1032,7 @@ static int g_last_slot_parity = -1;             // For slot boundary detection (
 #include "station_types.h"
 
 // FT4/FT8 runtime protocol selection — pointer swapped on protocol toggle.
+// volatile for dual-core cache coherency (see protocol.h).
 volatile const ProtocolConfig* g_protocol = &kProtocolFT8;
 volatile uint32_t g_protocol_change_seq = 0;
 
@@ -2930,9 +2931,30 @@ static void redraw_countdown_now() {
   ui_draw_countdown(frac, even, g_offset_hz);
 }
 
-// Forward declarations for single-threaded TX state machine
+// Forward declarations for TX state machine
 static void tx_start(int skip_tones);
 static void tx_tick();
+
+// ── TX hardware timer (Option D: architectural isolation) ──────────────────
+// tx_tick() is called from a 2 ms esp_timer periodic callback rather than
+// the main UI loop.  This completely decouples tone timing from:
+//   - waterfall draw time (~1 ms after Option C, was ~43 ms)
+//   - key scan overhead
+//   - BLE/UART processing
+//   - any future UI work added to the main loop
+//
+// Thread-safety note: both the timer task and app_task_core0 run on Core 0.
+// FreeRTOS schedules them sequentially (never concurrently).  The timer fires
+// at higher priority and preempts the main loop, so only one of them executes
+// tx_tick() or check_slot_boundary() at any moment.
+// Ordering invariant: tx_start() writes g_tx_active = true LAST, after all
+// other TX state (tone array, timing anchors) is fully initialised.  tx_tick()
+// checks g_tx_active FIRST and is therefore safe to call at any time.
+static esp_timer_handle_t s_tx_timer = nullptr;
+
+static void tx_timer_cb(void* /*arg*/) {
+    tx_tick();
+}
 
 // Slot boundary check - called from main loop
 // Matches reference project: tick after TX slot ends, TX trigger at slot start
@@ -2990,9 +3012,10 @@ static void check_slot_boundary() {
   }
 
   // TX trigger: check if we should start TX in this slot.
-  // FT4 uses a tight 500ms window because skipping more than ~10 tones
-  // straddles the first Costas array (sym 1-4), preventing decode lock.
-  int trigger_window_ms = (g_protocol->protocol_id == FTX_PROTOCOL_FT4) ? 500 : 4000;
+  // FT4 uses a tight 144ms window (3 symbols × 48ms) to guarantee the first
+  // Costas array (symbols 1–4) is always transmitted. Skipping ≥5 symbols
+  // (240ms) would obliterate the first Costas and prevent decode lock.
+  int trigger_window_ms = (g_protocol->protocol_id == FTX_PROTOCOL_FT4) ? 144 : 4000;
   if (g_qso_xmit &&
       g_target_slot_parity == slot_parity &&
       slot_ms < trigger_window_ms &&
@@ -3004,7 +3027,7 @@ static void check_slot_boundary() {
              (long long)slot_idx, slot_parity);
 
     // Calculate skip_tones for partial slot
-    int symbol_period_ms = (int)(g_protocol->symbol_period * 1000.0f);
+    int symbol_period_ms = (int)lrintf(g_protocol->symbol_period * 1000.0f);
     int skip_tones = slot_ms / symbol_period_ms;
     if (skip_tones < g_protocol->total_symbols) {
       // Only proceed if we have a valid pending TX
@@ -3135,7 +3158,8 @@ static void fft_waterfall_tx_tone(uint8_t tone) {
   if (pos < 0) pos = 0;
   if (pos >= (int)row.size()) pos = (int)row.size() - 1;
   row[pos] = 200;
-  ui_push_waterfall_row(row.data(), (int)row.size());
+  // Use the TX bypass path: always visible even when RX audio is muted.
+  ui_push_tx_waterfall_row(row.data(), (int)row.size());
 }
 
 [[maybe_unused]] static bool is_grid4(const std::string& s) {
@@ -3680,9 +3704,11 @@ static bool schedule_manual_pending_tx(const AutoseqTxEntry& pending) {
 
 // Helper to send TA command (deduplicated)
 static void tx_send_ta(float tone_hz) {
-  int ta_int = (int)lrintf(tone_hz);
-  float frac = tone_hz - (float)ta_int;
-  int ta_frac = (int)lrintf(frac * 100.0f);
+  // Use floorf so ta_int always rounds DOWN → frac always in [0,1) →
+  // ta_frac always 0..100.  Matches qmx_set_tone_hz() rounding logic.
+  int ta_int = (int)floorf(tone_hz);
+  float frac = tone_hz - (float)ta_int;   // always in [0.0, 1.0)
+  int ta_frac = (int)lrintf(frac * 100.0f); // always 0..100
   if (ta_int == g_tx_last_ta_int && ta_frac == g_tx_last_ta_frac) return;
   if (radio_control_set_tone_hz(tone_hz) == ESP_OK) {
     g_tx_last_ta_int = ta_int;
@@ -3737,7 +3763,7 @@ static void tx_start(int skip_tones) {
   g_tx_base_hz = g_pending_tx.offset_hz;
   g_tx_slot_start_ms = (now_ms / g_protocol->slot_time_ms) * g_protocol->slot_time_ms;
   g_tx_tone_idx = (skip_tones >= g_protocol->total_symbols) ? g_protocol->total_symbols : skip_tones;
-  int symbol_period_ms = (int)(g_protocol->symbol_period * 1000.0f);
+  int symbol_period_ms = (int)lrintf(g_protocol->symbol_period * 1000.0f);
   g_tx_next_tone_time = g_tx_slot_start_ms + g_tx_tone_idx * symbol_period_ms;
   g_tx_last_ta_int = -1;
   g_tx_last_ta_frac = -1;
@@ -3769,12 +3795,14 @@ static void tx_start(int skip_tones) {
     tx_send_ta(tone_hz);
   }
 
-  // Mark TX as active
+  // Mute incoming RX audio rows so the waterfall shows only TX tone markers.
+  ui_set_rx_waterfall_muted(true);
+  // Mark TX as active (written last — tx_tick() checks this first).
   g_tx_active = true;
 }
 
-// TX state machine tick - called from main loop
-// Sends one tone at a time, non-blocking
+// TX state machine tick — called from 2 ms esp_timer callback (tx_timer_cb).
+// Sends one tone at a time, non-blocking.  Must complete well within 2 ms.
 static void tx_tick() {
   if (!g_tx_active) {
     return;
@@ -3788,6 +3816,7 @@ static void tx_tick() {
     if (g_tx_cat_ok) {
       radio_control_end_tx();
     }
+    ui_set_rx_waterfall_muted(false);
     g_tx_active = false;
     g_pending_tx_valid = false;
     g_tx_cancel_requested = false;
@@ -3812,6 +3841,7 @@ static void tx_tick() {
     autoseq_mark_sent(g_tx_slot_idx);
     // g_was_txing stays true - tick will be called at slot boundary
 
+    ui_set_rx_waterfall_muted(false);
     g_tx_active = false;
     g_pending_tx_valid = false;
     g_tx_cancel_requested = false;
@@ -3829,7 +3859,7 @@ static void tx_tick() {
 
   // Advance to next tone, anchored to slot boundary
   g_tx_tone_idx++;
-  int symbol_period_ms = (int)(g_protocol->symbol_period * 1000.0f);
+  int symbol_period_ms = (int)lrintf(g_protocol->symbol_period * 1000.0f);
   g_tx_next_tone_time = g_tx_slot_start_ms + g_tx_tone_idx * symbol_period_ms;
 }
 
@@ -5811,6 +5841,25 @@ autoseq_set_cabrillo_fd_callback(log_cabrillo_fd_entry);
   }
   log_heap("BOOT");
 
+  // Start the TX tone timer.  Fires every 2 ms on the esp_timer task (Core 0).
+  // tx_tick() uses absolute timestamps so it only acts when a tone is due —
+  // it is a no-op during RX and costs < 1 µs when g_tx_active is false.
+  // skip_unhandled_events=true: if the timer fires while the callback is still
+  // running (shouldn't happen in practice), the extra event is silently dropped
+  // rather than queued.
+  {
+    const esp_timer_create_args_t tx_timer_args = {
+        .callback        = tx_timer_cb,
+        .arg             = nullptr,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name            = "tx_tick",
+        .skip_unhandled_events = true,
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&tx_timer_args, &s_tx_timer));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(s_tx_timer, 2000));  // 2000 µs = 2 ms
+    ESP_LOGI(TAG, "TX timer started: 2 ms periodic (ISOLATED architecture)");
+  }
+
   g_app_core0_stack_last_sample_tick = xTaskGetTickCount();
   {
     UBaseType_t free_words = uxTaskGetStackHighWaterMark2(NULL);
@@ -5969,7 +6018,7 @@ autoseq_set_cabrillo_fd_callback(log_cabrillo_fd_entry);
     update_countdown();
     consume_cdc_initial_sync();  // auto-sync VFO on first QMX connect (every iter)
     check_slot_boundary();  // TX trigger at slot boundary (matching reference architecture)
-    tx_tick();              // Process TX state machine (single-threaded, non-blocking)
+    // tx_tick() is now driven by s_tx_timer (2 ms periodic) — not the main loop.
 
     // Drain deferred config saves requested by the BLE RPC dispatch.
     // Clear before saving so a write that lands during the save just
@@ -6031,7 +6080,11 @@ autoseq_set_cabrillo_fd_callback(log_cabrillo_fd_entry);
       menu_flash_tick();
       rx_flash_tick();
       last_key = 0;
-      vTaskDelay(pdMS_TO_TICKS(10));
+      // Use 2ms loop delay during TX so tone timing is precise enough for
+      // FT4's 48ms symbols.  The end-of-loop vTaskDelay (further below) is
+      // unreachable from this early-exit path, so we must apply the TX-aware
+      // delay here too.
+      vTaskDelay(pdMS_TO_TICKS(g_tx_active ? 2 : 10));
       continue;
     }
   if (c == last_key) {
@@ -6042,7 +6095,8 @@ autoseq_set_cabrillo_fd_callback(log_cabrillo_fd_entry);
     }
     // NOTE: Beacon scheduling moved to decode_monitor_results()
     ui_draw_waterfall_if_dirty();
-    vTaskDelay(pdMS_TO_TICKS(10));
+    // Same TX-aware delay as the c==0 branch above.
+    vTaskDelay(pdMS_TO_TICKS(g_tx_active ? 2 : 10));
     continue;
   }
   last_key = c;
@@ -6052,7 +6106,7 @@ autoseq_set_cabrillo_fd_callback(log_cabrillo_fd_entry);
   // consume_cdc_initial_sync() already called above, before the early-exit
   // branches; no need to repeat here.
   check_slot_boundary();  // TX trigger at slot boundary (matching reference architecture)
-  tx_tick();              // Process TX state machine (single-threaded, non-blocking)
+  // tx_tick() is now driven by s_tx_timer (2 ms periodic) — not the main loop.
   menu_flash_tick();
   rx_flash_tick();
   apply_pending_sync();
@@ -6169,6 +6223,9 @@ autoseq_set_cabrillo_fd_callback(log_cabrillo_fd_entry);
           g_last_slot_parity = -1;
           g_decode_applied_slot_idx = rtc_now_ms() / g_protocol->slot_time_ms;
           g_protocol_change_seq = g_protocol_change_seq + 1;
+          // Clear pending TX to prevent misfire on slot boundary computed for old protocol
+          g_qso_xmit = false;
+          g_target_slot_parity = -1;
           save_station_data();
           sync_radio_to_current_band("protocol switch");
           debug_log_line(g_protocol == &kProtocolFT4 ? "Mode: FT4" : "Mode: FT8");

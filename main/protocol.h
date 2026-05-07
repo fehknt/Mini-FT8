@@ -32,7 +32,7 @@ inline const ProtocolConfig kProtocolFT4 = {
     .tone_spacing = 20.8333f
 };
 
-extern const ProtocolConfig* g_protocol;
+extern volatile const ProtocolConfig* g_protocol;  // volatile for dual-core cache coherency
 
 // Bumped by the UI thread whenever g_protocol changes. Stream tasks watch
 // this value and re-init their monitor_t in place at the next slot boundary

@@ -44,8 +44,12 @@ struct RxDecodeEntry {
 
 void ui_init(bool display_only = false);
 void ui_set_waterfall_row(int row, const uint8_t* bins, int len);
-// Push a new row into the waterfall ring buffer (advances head). UI task must flush.
+// Push a new row from the RX audio pipeline. Suppressed during TX (see ui_set_rx_waterfall_muted).
 void ui_push_waterfall_row(const uint8_t* bins, int len);
+// Push a TX tone marker row — always visible regardless of mute state.
+void ui_push_tx_waterfall_row(const uint8_t* bins, int len);
+// Mute/unmute incoming RX waterfall rows. Call with true when TX starts, false when TX ends.
+void ui_set_rx_waterfall_muted(bool muted);
 void ui_clear_waterfall();
 void ui_draw_waterfall();
 void ui_draw_waterfall_if_dirty();

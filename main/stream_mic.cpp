@@ -166,7 +166,7 @@ void stream_mic_task(void* /*arg*/) {
       }
 
       monitor_process(&mon, chunk);
-      vTaskDelayUntil(&next_wake, pdMS_TO_TICKS((uint32_t)(g_protocol->symbol_period * 1000.0f)));
+      vTaskDelayUntil(&next_wake, pdMS_TO_TICKS((uint32_t)lrintf(g_protocol->symbol_period * 1000.0f)));
     }
 
     // If WAV streaming started, skip decode and continue
