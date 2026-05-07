@@ -87,19 +87,119 @@ else()
     target_link_libraries(test_synth PRIVATE ft8_lib m)
 endif()
 
+# L2 State Machine Test
+add_executable(test_l2
+    test_l2_state_machine.cpp
+    tx_state_machine.cpp
+    decode_helper.cpp
+)
+target_include_directories(test_l2 PRIVATE ${CMAKE_SOURCE_DIR})
+if(WIN32)
+    target_link_libraries(test_l2 PRIVATE ft8_lib)
+else()
+    target_link_libraries(test_l2 PRIVATE ft8_lib m)
+endif()
+
+# Golden WAV generator (not a ctest — run manually to regenerate committed WAVs)
+# Usage: cd build && ./Release/gen_golden.exe ../golden   (Windows)
+#        cd build && ./gen_golden ../golden               (Linux/macOS)
+add_executable(gen_golden
+    gen_golden.cpp
+    decode_helper.cpp
+    synth.c
+)
+target_include_directories(gen_golden PRIVATE ${CMAKE_SOURCE_DIR})
+if(WIN32)
+    target_link_libraries(gen_golden PRIVATE ft8_lib)
+else()
+    target_link_libraries(gen_golden PRIVATE ft8_lib m)
+endif()
+if(NOT MSVC)
+    target_compile_options(gen_golden PRIVATE -Wno-format)
+endif()
+
+# L3 TX Poll-Timing test — validates that FT4 TX requires ≤2 ms main-loop poll
+add_executable(test_l3
+    test_l3_tx_poll_timing.cpp
+    decode_helper.cpp
+    synth.c
+)
+target_include_directories(test_l3 PRIVATE ${CMAKE_SOURCE_DIR})
+if(WIN32)
+    target_link_libraries(test_l3 PRIVATE ft8_lib)
+else()
+    target_link_libraries(test_l3 PRIVATE ft8_lib m)
+endif()
+if(NOT MSVC)
+    target_compile_options(test_l3 PRIVATE -Wno-format)
+endif()
+
+# Golden RX test — decodes committed WAV files; validates decoder in isolation
+add_executable(test_golden_rx
+    test_golden_rx.cpp
+    decode_helper.cpp
+)
+target_include_directories(test_golden_rx PRIVATE ${CMAKE_SOURCE_DIR})
+# Inject absolute path to golden/ directory so ctest finds the files regardless
+# of working directory.  Forward slashes work on all platforms including MSVC.
+target_compile_definitions(test_golden_rx PRIVATE
+    "GOLDEN_DIR=\"${CMAKE_SOURCE_DIR}/golden\""
+)
+if(WIN32)
+    target_link_libraries(test_golden_rx PRIVATE ft8_lib)
+else()
+    target_link_libraries(test_golden_rx PRIVATE ft8_lib m)
+endif()
+if(NOT MSVC)
+    target_compile_options(test_golden_rx PRIVATE -Wno-format)
+endif()
+
+# TA command format test — validates qmx_set_tone_hz() string formatting
+add_executable(test_ta_format test_ta_format.cpp)
+target_include_directories(test_ta_format PRIVATE ${CMAKE_SOURCE_DIR})
+if(WIN32)
+    target_link_libraries(test_ta_format PRIVATE ft8_lib)
+else()
+    target_link_libraries(test_ta_format PRIVATE ft8_lib m)
+endif()
+
+# L4 TX Timer-Isolation test — validates ISOLATED (esp_timer) vs COUPLED (main loop)
+add_executable(test_l4
+    test_l4_tx_timer_isolation.cpp
+    decode_helper.cpp
+)
+target_include_directories(test_l4 PRIVATE ${CMAKE_SOURCE_DIR})
+if(WIN32)
+    target_link_libraries(test_l4 PRIVATE ft8_lib)
+else()
+    target_link_libraries(test_l4 PRIVATE ft8_lib m)
+endif()
+if(NOT MSVC)
+    target_compile_options(test_l4 PRIVATE -Wno-format)
+endif()
+
+# WAV diagnostic tool — run manually, not via ctest
+# Usage: test_wav_diag <file.wav> [expected_message] [ft8|ft4]
+add_executable(test_wav_diag
+    test_wav_diag.cpp
+    decode_helper.cpp
+)
+target_include_directories(test_wav_diag PRIVATE ${CMAKE_SOURCE_DIR})
+if(WIN32)
+    target_link_libraries(test_wav_diag PRIVATE ft8_lib)
+else()
+    target_link_libraries(test_wav_diag PRIVATE ft8_lib m)
+endif()
+if(NOT MSVC)
+    target_compile_options(test_wav_diag PRIVATE -Wno-format)
+endif()
+
 # Enable testing
 enable_testing()
-add_test(NAME simple COMMAND test_simple)
-add_test(NAME l1_encoder COMMAND test_l1)
-
-# L2 State Machine Test (placeholder for now)
-# add_executable(test_l2
-#     test_l2_state_machine.cpp
-#     tx_state_machine.cpp
-#     cat_recorder.cpp
-#     decode_helper.cpp
-#     synth.c
-# )
-# target_include_directories(test_l2 PRIVATE ${CMAKE_SOURCE_DIR})
-# target_link_libraries(test_l2 PRIVATE ft8_lib m)
-# add_test(NAME l2_state_machine COMMAND test_l2)
+add_test(NAME simple             COMMAND test_simple)
+add_test(NAME l1_encoder         COMMAND test_l1)
+add_test(NAME l2_state_machine   COMMAND test_l2)
+add_test(NAME l3_poll_timing     COMMAND test_l3)
+add_test(NAME l4_timer_isolation COMMAND test_l4)
+add_test(NAME golden_rx          COMMAND test_golden_rx)
+add_test(NAME ta_format          COMMAND test_ta_format)
