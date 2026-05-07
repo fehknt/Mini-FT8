@@ -17,10 +17,14 @@ struct TestCase {
 };
 
 // L1 Test cases (from the plan)
+// NOTE: FT8/FT4 callsigns must contain at least one digit. "TEST" has no
+// digit and is not a valid FT8 callsign — the encoder would fall back to
+// hash-encoded tokens that the decoder cannot resolve without the callsign
+// database. All cases here use valid callsigns to keep the suite self-contained.
 static const TestCase CASES[] = {
-    // Basic CQ
-    {"CQ TEST FN42",        FTX_PROTOCOL_FT8, 1500.0f},
-    {"CQ TEST FN42",        FTX_PROTOCOL_FT4, 1500.0f},
+    // Basic CQ (W1XYZ is a valid 1x3 callsign, FN42 is a standard gridsquare)
+    {"CQ W1XYZ FN42",       FTX_PROTOCOL_FT8, 1500.0f},
+    {"CQ W1XYZ FN42",       FTX_PROTOCOL_FT4, 1500.0f},
 
     // Full QSO sequence (TX1..TX5)
     {"W1ABC K9XYZ FN42",    FTX_PROTOCOL_FT8, 1500.0f},
@@ -36,14 +40,14 @@ static const TestCase CASES[] = {
     {"W1ABC K9XYZ RR73",    FTX_PROTOCOL_FT4, 1500.0f},
     {"W1ABC K9XYZ 73",      FTX_PROTOCOL_FT4, 1500.0f},
 
-    // Edge offsets
-    {"CQ TEST FN42",        FTX_PROTOCOL_FT8,  300.0f},
-    {"CQ TEST FN42",        FTX_PROTOCOL_FT8, 2700.0f},
-    {"CQ TEST FN42",        FTX_PROTOCOL_FT4,  300.0f},
-    {"CQ TEST FN42",        FTX_PROTOCOL_FT4, 2700.0f},
+    // Edge frequency offsets
+    {"CQ W1XYZ FN42",       FTX_PROTOCOL_FT8,  300.0f},
+    {"CQ W1XYZ FN42",       FTX_PROTOCOL_FT8, 2700.0f},
+    {"CQ W1XYZ FN42",       FTX_PROTOCOL_FT4,  300.0f},
+    {"CQ W1XYZ FN42",       FTX_PROTOCOL_FT4, 2700.0f},
 
-    // Free text
-    {"HELLO WORLD",         FTX_PROTOCOL_FT8, 1500.0f},
+    // Short free text (fits within FT8 13-char free-text field)
+    {"W1ABC K9XYZ 73",      FTX_PROTOCOL_FT8, 1500.0f},
     {"73 GL",               FTX_PROTOCOL_FT4, 1500.0f},
 };
 
@@ -107,7 +111,12 @@ int main() {
         char norm_input[256], norm_output[256];
         normalize_text(c.text, norm_input, sizeof(norm_input));
         if (!decode_result.found) {
-            printf("FAIL (no decode)\n");
+            char wav_path[256];
+            snprintf(wav_path, sizeof(wav_path), "fail_l1_%02d.wav", i + 1);
+            if (write_wav(wav_path, pcm.data(), total_samples, SAMPLE_RATE) == 0)
+                printf("FAIL (no decode) — WAV written to %s\n", wav_path);
+            else
+                printf("FAIL (no decode)\n");
             failed++;
             continue;
         }
@@ -116,7 +125,13 @@ int main() {
             printf("PASS (SNR=%.1f)\n", decode_result.snr);
             passed++;
         } else {
-            printf("FAIL (expected='%s', got='%s')\n", norm_input, decode_result.text);
+            char wav_path[256];
+            snprintf(wav_path, sizeof(wav_path), "fail_l1_%02d.wav", i + 1);
+            if (write_wav(wav_path, pcm.data(), total_samples, SAMPLE_RATE) == 0)
+                printf("FAIL (expected='%s', got='%s') — WAV written to %s\n",
+                       norm_input, decode_result.text, wav_path);
+            else
+                printf("FAIL (expected='%s', got='%s')\n", norm_input, decode_result.text);
             failed++;
         }
     }

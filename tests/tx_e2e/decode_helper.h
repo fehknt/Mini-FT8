@@ -3,6 +3,9 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#ifdef __cplusplus
+#include <vector>
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -32,6 +35,27 @@ void decode_clear_hashes(void);
 /// @return DecodeResult with .found=true if successful
 DecodeResult decode_pcm(const float* samples, int n_samples, int fs,
                         ftx_protocol_t proto);
+
+/// Read a 16-bit mono PCM WAV file into a float sample vector.
+/// Validates format (must be PCM, mono, 16-bit).
+///
+/// @param path        Input file path
+/// @param out_samples [OUT] float samples, range [-1.0, 1.0]
+/// @param out_fs      [OUT] sample rate found in the file
+/// @return 0 on success, -1 on error (message printed to stderr)
+#ifdef __cplusplus
+int read_wav(const char* path, std::vector<float>& out_samples, int* out_fs);
+#endif
+
+/// Write PCM samples to a 16-bit mono WAV file.
+/// Useful for dumping failure artifacts for inspection in Audacity / WSJT-X.
+///
+/// @param path        Output file path (e.g. "fail_case3.wav")
+/// @param samples     Float PCM, range [-1.0, 1.0]
+/// @param n_samples   Number of samples
+/// @param fs          Sample rate in Hertz
+/// @return 0 on success, -1 on error (message printed to stderr)
+int write_wav(const char* path, const float* samples, int n_samples, int fs);
 
 /// Normalize message text for comparison
 /// - Convert to uppercase

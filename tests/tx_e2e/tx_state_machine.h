@@ -2,6 +2,7 @@
 #define _TX_E2E_STATE_MACHINE_H_
 
 #include <stdint.h>
+#include <string>
 #include <vector>
 #include "../../components/ft8_lib/ft8/constants.h"
 
@@ -32,7 +33,14 @@ struct CatEvent {
 // Run TX state machine, return CAT event stream
 std::vector<CatEvent> run_tx(const TxConfig& cfg, int64_t loop_delay_ms = 2);
 
-// Synthesize PCM from CAT event stream
+// Verify that tick-loop TA events are slot-anchored within tolerance.
+// Returns "" on success, or an error string on the first violation.
+// sym_ms: symbol period in milliseconds (FT8=160, FT4=48)
+std::string verify_event_timing(const std::vector<CatEvent>& events,
+                                const TxConfig& cfg,
+                                int sym_ms, int64_t loop_delay_ms);
+
+// Synthesize PCM from CAT event stream (phase-continuous FSK)
 std::vector<float> events_to_pcm(const std::vector<CatEvent>& events,
                                  int sample_rate, float amplitude);
 
