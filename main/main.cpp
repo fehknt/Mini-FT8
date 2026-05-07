@@ -1036,19 +1036,28 @@ static int g_last_slot_parity = -1;             // For slot boundary detection (
 volatile const ProtocolConfig* g_protocol = &kProtocolFT8;
 volatile uint32_t g_protocol_change_seq = 0;
 
-static const std::vector<BandItem> k_ft8_bands = {
+static std::vector<BandItem> g_ft8_bands = {
     {"160m", 1840},   {"80m", 3573},   {"60m", 5357},   {"40m", 7074},
     {"30m", 10136},   {"20m", 14074},  {"17m", 18100},  {"15m", 21074},
     {"12m", 24915},   {"10m", 28074},  {"6m", 50313},   {"2m", 144174},
 };
-static const std::vector<BandItem> k_ft4_bands = {
+static std::vector<BandItem> g_ft4_bands = {
     {"160m", 1840.0f},  {"80m", 3575.0f},  {"60m", 5357.0f},  {"40m", 7047.5f},
     {"30m", 10140.0f},  {"20m", 14080.0f}, {"17m", 18104.0f}, {"15m", 21140.0f},
     {"12m", 24919.0f},  {"10m", 28180.0f}, {"6m", 50318.0f},  {"2m", 144170.0f},
 };
-// g_bands is the active band table; updated by apply_protocol() on every
+// g_bands is the active band table; updated by set_protocol() on every
 // protocol switch so core_api.cpp can use it via extern.
-std::vector<BandItem> g_bands = std::vector<BandItem>(k_ft8_bands);  // visible to core_api.cpp
+std::vector<BandItem> g_bands = std::vector<BandItem>(g_ft8_bands);  // visible to core_api.cpp
+
+// Set the active protocol and sync the band table. Call this instead of
+// assigning g_protocol directly so g_bands stays consistent.
+static void set_protocol(const ProtocolConfig* p) {
+    g_protocol = p;
+    g_bands = (p == &kProtocolFT4)
+              ? std::vector<BandItem>(g_ft4_bands)
+              : std::vector<BandItem>(g_ft8_bands);
+}
 static std::string g_active_band_text = "80 40 20 17 15 12 10";
 static std::vector<int> g_active_band_indices;
 static int band_page = 0;
@@ -5299,7 +5308,7 @@ static void load_station_data() {
     } else if (sscanf(line, "rtc_sleep_epoch=%lld", &epoch_tmp_ll) == 1) {
       g_rtc_sleep_epoch = (time_t)epoch_tmp_ll;
     } else if (sscanf(line, "protocol_mode=%d", &val) == 1) {
-      g_protocol = (val == 1) ? &kProtocolFT4 : &kProtocolFT8;
+      set_protocol((val == 1) ? &kProtocolFT4 : &kProtocolFT8);
     }
   }
   fclose(f);
@@ -6219,7 +6228,7 @@ autoseq_set_cabrillo_fd_callback(log_cabrillo_fd_entry);
         if (g_tx_active) {
           debug_log_line("Cannot switch protocol during TX");
         } else {
-          g_protocol = (g_protocol == &kProtocolFT8) ? &kProtocolFT4 : &kProtocolFT8;
+          set_protocol((g_protocol == &kProtocolFT8) ? &kProtocolFT4 : &kProtocolFT8);
           g_last_slot_parity = -1;
           g_decode_applied_slot_idx = rtc_now_ms() / g_protocol->slot_time_ms;
           g_protocol_change_seq = g_protocol_change_seq + 1;
@@ -6354,7 +6363,7 @@ autoseq_set_cabrillo_fd_callback(log_cabrillo_fd_entry);
                 if (g_tx_active) {
                   debug_log_line("Cannot switch protocol during TX");
                 } else {
-                  g_protocol = (g_protocol == &kProtocolFT8) ? &kProtocolFT4 : &kProtocolFT8;
+                  set_protocol((g_protocol == &kProtocolFT8) ? &kProtocolFT4 : &kProtocolFT8);
                   g_last_slot_parity = -1;
                   g_decode_applied_slot_idx = rtc_now_ms() / g_protocol->slot_time_ms;
                   g_protocol_change_seq = g_protocol_change_seq + 1;
@@ -6422,7 +6431,7 @@ autoseq_set_cabrillo_fd_callback(log_cabrillo_fd_entry);
                 if (g_tx_active) {
                   debug_log_line("Cannot switch protocol during TX");
                 } else {
-                  g_protocol = (g_protocol == &kProtocolFT8) ? &kProtocolFT4 : &kProtocolFT8;
+                  set_protocol((g_protocol == &kProtocolFT8) ? &kProtocolFT4 : &kProtocolFT8);
                   g_last_slot_parity = -1;
                   g_decode_applied_slot_idx = rtc_now_ms() / g_protocol->slot_time_ms;
                   g_protocol_change_seq = g_protocol_change_seq + 1;
@@ -6922,7 +6931,7 @@ autoseq_set_cabrillo_fd_callback(log_cabrillo_fd_entry);
                 if (g_tx_active) {
                   debug_log_line("Cannot switch protocol during TX");
                 } else {
-                  g_protocol = (g_protocol == &kProtocolFT8) ? &kProtocolFT4 : &kProtocolFT8;
+                  set_protocol((g_protocol == &kProtocolFT8) ? &kProtocolFT4 : &kProtocolFT8);
                   g_last_slot_parity = -1;
                   g_decode_applied_slot_idx = rtc_now_ms() / g_protocol->slot_time_ms;
                   g_protocol_change_seq = g_protocol_change_seq + 1;

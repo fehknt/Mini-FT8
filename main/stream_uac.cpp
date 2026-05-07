@@ -881,6 +881,10 @@ bool uac_start(void) {
     return uac_start_with_profile(UAC_PROFILE_QMX);
 }
 
+bool uac_qmx_detected(void) {
+    return s_mic_handle != NULL || s_cdc_handle != NULL;
+}
+
 void uac_stop(void) {
     if (s_state == UAC_STATE_IDLE) {
         return;
